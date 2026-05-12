@@ -1,7 +1,14 @@
 // Middleware: Basic Auth cho toàn bộ dashboard
 export async function onRequest(context) {
+  const url = new URL(context.request.url);
+
+  // /api/auth là public — không cần Basic Auth (dùng cho tool desktop đăng ký/đăng nhập)
+  if (url.pathname === "/api/auth") {
+    return await context.next();
+  }
+
   const auth = context.request.headers.get("Authorization") || "";
-  // "mvh30:30102002" base64 = "bXZoMzA6MzAxMDIwMDI="
+  // "mvh30:30102002" in base64 = "bXZoMzA6MzAxMDIwMDI="
   if (auth !== "Basic bXZoMzA6MzAxMDIwMDI=") {
     return new Response("Vui lòng đăng nhập", {
       status: 401,
@@ -12,6 +19,5 @@ export async function onRequest(context) {
     });
   }
 
-  // Auth OK — continue to page/API
   return await context.next();
 }

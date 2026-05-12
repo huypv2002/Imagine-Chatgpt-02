@@ -889,8 +889,9 @@ class RightPanel(QFrame):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, max_sessions: int = 3):
         super().__init__()
+        self.max_sessions = max_sessions
         self.setWindowTitle("Image Generator v1.0")
         self.setMinimumSize(1100, 680)
         self._build()
@@ -1024,7 +1025,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(gen_page)
 
         # Page 1: Quản Lý Session (full width)
-        self.session_page = SessionPage()
+        self.session_page = SessionPage(max_sessions=self.max_sessions)
         self.pages.addWidget(self.session_page)
 
         root.addWidget(self.pages)
@@ -1126,8 +1127,9 @@ class MainWindow(QMainWindow):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SessionPage(QWidget):
-    def __init__(self):
+    def __init__(self, max_sessions: int = 3):
         super().__init__()
+        self.max_sessions = max_sessions
         self._build()
         self.reload()
 
@@ -1224,7 +1226,7 @@ class SessionPage(QWidget):
         TYPE = {"free": "Miễn phí", "plus": "Plus", "team": "Team", "pro": "Pro"}
 
         active = sum(1 for a in accounts if a.get("status") == "正常")
-        self.stat_lbl.setText(f"{len(accounts)} sessions · {active} hoạt động")
+        self.stat_lbl.setText(f"{len(accounts)}/{self.max_sessions} sessions · {active} hoạt động")
 
         for row, acc in enumerate(accounts):
             token = acc.get("access_token", "")
@@ -1252,6 +1254,17 @@ class SessionPage(QWidget):
             self.table.setItem(row, 6, QTableWidgetItem(str(acc.get("fail", 0))))
 
     def _add(self):
+        # Kiểm tra giới hạn max_sessions từ D1
+        current_count = len(account_service.list_accounts())
+        if current_count >= self.max_sessions:
+            QMessageBox.warning(
+                self, "Đã đạt giới hạn",
+                f"Tài khoản của bạn chỉ được thêm tối đa {self.max_sessions} session token.\n"
+                f"Hiện tại: {current_count}/{self.max_sessions}\n\n"
+                "Liên hệ admin để nâng cấp giới hạn."
+            )
+            return
+
         dlg = QDialog(self)
         dlg.setWindowTitle("Thêm Session")
         dlg.setMinimumWidth(520)
@@ -1438,11 +1451,234 @@ class SessionPage(QWidget):
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTH API URL
+# ═══════════════════════════════════════════════════════════════════════════════
+AUTH_API_URL = "https://image-gen-admin-2xn.pages.dev/api/auth"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGIN / REGISTER DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class LoginDialog(QDialog):
+    """Màn hình đăng nhập / đăng ký"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Imagine GPT")
+        self.setFixedSize(420, 420)
+        self.user_data = None
+        self._mode = "login"  # "login" or "register"
+        self._build()
+
+    def _build(self):
+        # Override stylesheet cho dialog này
+        self.setStyleSheet("""
+            QDialog { background-color: #ffffff; }
+            QWidget { background-color: transparent; color: #1a1a2e; font-family: -apple-system, "Segoe UI", sans-serif; font-size: 14px; }
+            QLineEdit {
+                background-color: #f9fafb;
+                border: 1.5px solid #e5e7eb;
+                border-radius: 8px;
+                padding: 12px 14px;
+                font-size: 14px;
+                color: #1a1a2e;
+            }
+            QLineEdit:focus { border: 1.5px solid #2563eb; background-color: #fff; }
+            QPushButton#loginBtn {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton#loginBtn:hover { background-color: #1d4ed8; }
+            QPushButton#switchBtn {
+                background-color: transparent;
+                color: #2563eb;
+                border: none;
+                font-size: 13px;
+                padding: 4px;
+            }
+            QPushButton#switchBtn:hover { color: #1d4ed8; }
+        """)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Top accent bar
+        bar = QWidget()
+        bar.setFixedHeight(5)
+        bar.setStyleSheet("background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #2563eb, stop:1 #7c3aed);")
+        outer.addWidget(bar)
+
+        # Content
+        content = QWidget()
+        content.setStyleSheet("background: #ffffff;")
+        lay = QVBoxLayout(content)
+        lay.setSpacing(16)
+        lay.setContentsMargins(40, 36, 40, 36)
+
+        # Logo / Title
+        title = QLabel("Imagine GPT")
+        title.setStyleSheet("font-size: 26px; font-weight: 700; color: #1a1a2e; background: transparent;")
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+
+        self.subtitle = QLabel("Đăng nhập để tiếp tục")
+        self.subtitle.setStyleSheet("color: #6b7280; font-size: 13px; background: transparent;")
+        self.subtitle.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.subtitle)
+
+        lay.addSpacing(8)
+
+        # Username
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Username")
+        self.username_input.setFixedHeight(46)
+        lay.addWidget(self.username_input)
+
+        # Password
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setFixedHeight(46)
+        self.password_input.returnPressed.connect(self._submit)
+        lay.addWidget(self.password_input)
+
+        # Error/success message
+        self.msg_label = QLabel("")
+        self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
+        self.msg_label.setWordWrap(True)
+        self.msg_label.setAlignment(Qt.AlignCenter)
+        self.msg_label.setFixedHeight(32)
+        lay.addWidget(self.msg_label)
+
+        # Submit button
+        self.submit_btn = QPushButton("Đăng nhập")
+        self.submit_btn.setFixedHeight(46)
+        self.submit_btn.setCursor(Qt.PointingHandCursor)
+        self.submit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #1d4ed8; }
+            QPushButton:pressed { background-color: #1e40af; }
+            QPushButton:disabled { background-color: #93c5fd; color: #ffffff; }
+        """)
+        self.submit_btn.clicked.connect(self._submit)
+        lay.addWidget(self.submit_btn)
+
+        # Switch mode
+        switch_row = QHBoxLayout()
+        switch_row.setAlignment(Qt.AlignCenter)
+        self.switch_hint = QLabel("Chưa có tài khoản?")
+        self.switch_hint.setStyleSheet("color: #6b7280; font-size: 13px; background: transparent;")
+        self.switch_btn = QPushButton("Đăng ký ngay")
+        self.switch_btn.setObjectName("switchBtn")
+        self.switch_btn.setCursor(Qt.PointingHandCursor)
+        self.switch_btn.clicked.connect(self._toggle_mode)
+        switch_row.addWidget(self.switch_hint)
+        switch_row.addWidget(self.switch_btn)
+        lay.addLayout(switch_row)
+
+        outer.addWidget(content)
+
+    def _toggle_mode(self):
+        if self._mode == "login":
+            self._mode = "register"
+            self.subtitle.setText("Tạo tài khoản mới")
+            self.submit_btn.setText("Đăng ký")
+            self.switch_hint.setText("Đã có tài khoản?")
+            self.switch_btn.setText("Đăng nhập")
+        else:
+            self._mode = "login"
+            self.subtitle.setText("Đăng nhập để tiếp tục")
+            self.submit_btn.setText("Đăng nhập")
+            self.switch_hint.setText("Chưa có tài khoản?")
+            self.switch_btn.setText("Đăng ký ngay")
+        self.msg_label.setText("")
+        self.username_input.clear()
+        self.password_input.clear()
+
+    def _submit(self):
+        self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
+        self.msg_label.setText("")
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        if not username or not password:
+            self.msg_label.setText("Vui lòng nhập username và password.")
+            return
+
+        self.submit_btn.setEnabled(False)
+        self.submit_btn.setText("Đang xử lý...")
+
+        try:
+            from curl_cffi import requests as cffi_requests
+            resp = cffi_requests.post(
+                AUTH_API_URL,
+                json={"action": self._mode, "username": username, "password": password},
+                timeout=15,
+                impersonate="chrome"
+            )
+            # Handle non-JSON response
+            content_type = resp.headers.get("content-type", "")
+            if "json" not in content_type:
+                self.msg_label.setText(f"Lỗi server (HTTP {resp.status_code}). Thử lại sau.")
+                self.submit_btn.setEnabled(True)
+                self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+                return
+            data = resp.json()
+        except Exception as e:
+            err = str(e)
+            if "unexpected character" in err or "json" in err.lower():
+                self.msg_label.setText("Lỗi server. Vui lòng thử lại sau.")
+            else:
+                self.msg_label.setText(f"Lỗi kết nối: {err[:60]}")
+            self.submit_btn.setEnabled(True)
+            self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+            return
+
+        self.submit_btn.setEnabled(True)
+        self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+
+        if data.get("ok"):
+            if self._mode == "login":
+                self.user_data = data.get("user")
+                self.accept()
+            else:
+                self.msg_label.setStyleSheet("color: #059669; font-size: 12px; background: transparent;")
+                self.msg_label.setText(data.get("message", "Đăng ký thành công! Hãy đăng nhập."))
+                self._toggle_mode()
+        else:
+            self.msg_label.setText(data.get("error", "Thất bại"))
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("Image Generator")
-    win = MainWindow()
+
+    # Login required
+    login = LoginDialog()
+    if login.exec() != QDialog.Accepted:
+        sys.exit(0)
+
+    # User authenticated — lưu max_sessions từ D1
+    user_data = login.user_data
+    max_sessions = user_data.get("max_sessions", 3)
+
+    win = MainWindow(max_sessions=max_sessions)
+    win.setWindowTitle(f"Image Generator v1.0 — {user_data.get('username', '')}")
     win.show()
     sys.exit(app.exec())
 
