@@ -32,6 +32,7 @@ jobs:
           pip install --upgrade pip wheel setuptools
           pip install PySide6
           pip install curl-cffi
+          pip install fastapi
           pip install pillow
           pip install pybase64
           pip install tiktoken
@@ -113,7 +114,6 @@ jobs:
             --nofollow-import-to=psycopg2 `
             --nofollow-import-to=gitpython `
             --nofollow-import-to=uvicorn `
-            --nofollow-import-to=fastapi `
             --no-pyi-file `
             --assume-yes-for-downloads `
             image_generator_ui.py

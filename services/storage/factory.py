@@ -4,10 +4,6 @@ import os
 from pathlib import Path
 
 from services.storage.base import StorageBackend
-from services.storage.database_storage import DatabaseStorageBackend
-from services.storage.git_storage import GitStorageBackend
-from services.storage.json_storage import JSONStorageBackend
-from services.storage.r2_storage import R2StorageBackend
 
 
 def create_storage_backend(data_dir: Path) -> StorageBackend:
@@ -28,6 +24,8 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     
     if backend_type == "json":
         # 本地 JSON 文件存储
+        from services.storage.json_storage import JSONStorageBackend
+
         file_path = data_dir / "accounts.json"
         auth_keys_path = data_dir / "auth_keys.json"
         print(f"[storage] Using JSON storage: {file_path}")
@@ -35,6 +33,8 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     
     elif backend_type in ("sqlite", "postgres", "postgresql", "mysql", "database"):
         # 数据库存储
+        from services.storage.database_storage import DatabaseStorageBackend
+
         database_url = os.getenv("DATABASE_URL", "").strip()
         
         if not database_url:
@@ -48,6 +48,8 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     
     elif backend_type == "git":
         # Git 仓库存储
+        from services.storage.git_storage import GitStorageBackend
+
         repo_url = os.getenv("GIT_REPO_URL", "").strip()
         token = os.getenv("GIT_TOKEN", "").strip()
         branch = os.getenv("GIT_BRANCH", "main").strip()
@@ -73,6 +75,8 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         )
     
     elif backend_type in ("r2", "cloudflare_r2"):
+        from services.storage.r2_storage import R2StorageBackend
+
         settings = {
             "account_id": os.getenv("R2_ACCOUNT_ID", "").strip(),
             "access_key_id": os.getenv("R2_ACCESS_KEY_ID", "").strip(),

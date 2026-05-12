@@ -19,8 +19,16 @@ GITHUB_OWNER = "huypv2002"
 GITHUB_REPO = "Imagine-Chatgpt-02"
 ASSET_NAME = "Imagine-GPT-windows.zip"
 EXE_NAME = "Imagine-GPT.exe"
-VERSION_FILE = Path(__file__).parent / "VERSION"
 # ============================================================
+
+
+def runtime_app_dir() -> Path:
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).parent
+
+
+VERSION_FILE = runtime_app_dir() / "VERSION"
 
 
 def get_current_version() -> str:
@@ -130,7 +138,7 @@ def apply_update(new_app_dir: str):
     """Create batch script to replace app files and restart"""
     import subprocess
 
-    app_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+    app_dir = runtime_app_dir()
     bat_path = app_dir / "_updater.bat"
 
     # Batch script: wait for process to exit, copy new files, restart

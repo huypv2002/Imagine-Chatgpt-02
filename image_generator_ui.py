@@ -8,6 +8,7 @@ import json
 import sys
 import subprocess
 import platform
+import traceback
 from pathlib import Path
 from datetime import datetime
 from typing import List
@@ -30,11 +31,42 @@ from services.openai_backend_api import OpenAIBackendAPI, InvalidAccessTokenErro
 from utils.log import logger
 
 
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = app_dir()
+CRASH_LOG = APP_DIR / "Imagine-GPT-crash.log"
+
+
+def write_crash_log(exc: BaseException) -> None:
+    try:
+        CRASH_LOG.write_text(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def install_crash_hook() -> None:
+    def handle_exception(exc_type, exc, tb):
+        try:
+            CRASH_LOG.write_text("".join(traceback.format_exception(exc_type, exc, tb)), encoding="utf-8")
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = handle_exception
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOCAL NAMES STORAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-NAMES_FILE = Path(__file__).parent / "data" / "account_names.json"
+NAMES_FILE = APP_DIR / "data" / "account_names.json"
 
 
 def _load_names() -> dict:
@@ -1081,7 +1113,7 @@ class MainWindow(QMainWindow):
         dl.addWidget(QLabel("Quét mã QR Zalo để liên hệ admin:"))
         from PySide6.QtGui import QPixmap
         img_label = QLabel()
-        img_path = Path(__file__).parent / "zalo.jpg"
+        img_path = APP_DIR / "zalo.jpg"
         if img_path.exists():
             pix = QPixmap(str(img_path))
             img_label.setPixmap(pix.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1106,7 +1138,7 @@ class MainWindow(QMainWindow):
         dl.addWidget(QLabel("Quét mã QR để donate ủng hộ tác giả:"))
         from PySide6.QtGui import QPixmap
         img_label = QLabel()
-        img_path = Path(__file__).parent / "qrdonate.jpg"
+        img_path = APP_DIR / "qrdonate.jpg"
         if img_path.exists():
             pix = QPixmap(str(img_path))
             img_label.setPixmap(pix.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1664,23 +1696,33 @@ class LoginDialog(QDialog):
 
 
 def main():
+    install_crash_hook()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("Image Generator")
 
-    # Login required
-    login = LoginDialog()
-    if login.exec() != QDialog.Accepted:
-        sys.exit(0)
+    try:
+        # Login required
+        login = LoginDialog()
+        if login.exec() != QDialog.Accepted:
+            sys.exit(0)
 
-    # User authenticated — lưu max_sessions từ D1
-    user_data = login.user_data
-    max_sessions = user_data.get("max_sessions", 3)
+        # User authenticated — lưu max_sessions từ D1
+        user_data = login.user_data
+        max_sessions = user_data.get("max_sessions", 3)
 
-    win = MainWindow(max_sessions=max_sessions)
-    win.setWindowTitle(f"Image Generator v1.0 — {user_data.get('username', '')}")
-    win.show()
-    sys.exit(app.exec())
+        win = MainWindow(max_sessions=max_sessions)
+        win.setWindowTitle(f"Image Generator v{getattr(sys, 'IMAGINE_GPT_VERSION', '1.2')} — {user_data.get('username', '')}")
+        win.show()
+        sys.exit(app.exec())
+    except Exception as exc:
+        write_crash_log(exc)
+        QMessageBox.critical(
+            None,
+            "Imagine GPT lỗi khởi động",
+            f"Ứng dụng gặp lỗi khi mở.\n\nLog đã lưu tại:\n{CRASH_LOG}\n\n{exc}",
+        )
+        raise
 
 
 if __name__ == "__main__":

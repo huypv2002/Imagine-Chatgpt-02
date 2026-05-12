@@ -20,6 +20,7 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
 BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
+APP_VERSION_FALLBACK = "1.2"
 
 DEFAULT_BACKUP_INCLUDE = {
     "config": True,
@@ -160,7 +161,7 @@ def _ensure_runtime_files() -> None:
     if not auth_keys_file.exists():
         auth_keys_file.write_text('{"items": []}\n', encoding="utf-8")
     if not VERSION_FILE.exists():
-        VERSION_FILE.write_text("0.0\n", encoding="utf-8")
+        VERSION_FILE.write_text(f"{APP_VERSION_FALLBACK}\n", encoding="utf-8")
 
 
 def _load_settings() -> LoadedSettings:
