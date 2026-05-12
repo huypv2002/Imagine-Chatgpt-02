@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Github } from "lucide-react";
+import { Coffee, Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
@@ -11,15 +11,18 @@ import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/image", label: "画图" },
   { href: "/accounts", label: "号池管理" },
+  { href: "/users", label: "账号" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
   { href: "/settings", label: "设置" },
+  { href: "/donate", label: "Donate" },
 ];
 
-const userNavItems = [{ href: "/image", label: "画图" }];
+const userNavItems = [{ href: "/image", label: "画图" }, { href: "/donate", label: "Donate" }];
 
 export function TopNav() {
   const pathname = usePathname();
@@ -83,6 +86,14 @@ export function TopNav() {
           >
             <Github className="size-4" />
             <span className="hidden md:inline">GitHub</span>
+          </a>
+          <a
+            href="/donate"
+            className="inline-flex items-center gap-1.5 py-1 text-sm text-stone-400 transition hover:text-stone-700"
+            aria-label="Donate"
+          >
+            <Coffee className="size-4" />
+            <span className="hidden md:inline">Donate</span>
           </a>
           <button
             type="button"

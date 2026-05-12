@@ -1,13 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useState } from "react";
-import { LoaderCircle, LockKeyhole } from "lucide-react";
+import { Coffee, LoaderCircle, LockKeyhole, UserRoundPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import webConfig from "@/constants/common-env";
 import { login } from "@/lib/api";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
 import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
@@ -92,6 +94,22 @@ export default function LoginPage() {
             {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
             登录
           </Button>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-sm">
+            <Link href="/signup" className="inline-flex items-center gap-2 text-stone-600 transition hover:text-stone-950">
+              <UserRoundPlus className="size-4" />
+              注册账号
+            </Link>
+            <a
+              href={webConfig.donateUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 text-stone-600 transition hover:text-stone-950"
+            >
+              <Coffee className="size-4" />
+              Donate
+            </a>
+          </div>
         </CardContent>
       </Card>
     </div>

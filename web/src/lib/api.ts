@@ -161,6 +161,50 @@ export type SystemLog = {
   [key: string]: unknown;
 };
 
+export type DashboardSummary = {
+  date: string;
+  accounts: {
+    total: number;
+    active: number;
+    limited: number;
+    abnormal: number;
+    disabled: number;
+    created_today: number;
+    deleted_today: number;
+  };
+  calls: {
+    today_total: number;
+    today_success: number;
+    today_failed: number;
+    today_other: number;
+    all_time_total: number;
+    unique_actors_today: number;
+  };
+  images: {
+    today_total: number;
+    today_success: number;
+    today_failed: number;
+    all_time_total: number;
+  };
+  videos: {
+    today_total: number;
+    all_time_total: number;
+  };
+  tasks: {
+    total: number;
+  };
+  endpoints: Array<{ endpoint: string; count: number }>;
+  recent_activity: Array<{
+    id: string;
+    time: string;
+    type: string;
+    summary?: string;
+    status?: string;
+    endpoint?: string;
+    actor?: string;
+  }>;
+};
+
 export type ImageResponse = {
   created: number;
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
@@ -189,6 +233,10 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+};
+
+export type RegisterResponse = LoginResponse & {
+  key: string;
 };
 
 export type UserKey = {
@@ -246,6 +294,14 @@ export async function login(authKey: string) {
     headers: {
       Authorization: `Bearer ${normalizedAuthKey}`,
     },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function registerUser(body: { name?: string; invite_code?: string }) {
+  return httpRequest<RegisterResponse>("/auth/register", {
+    method: "POST",
+    body,
     redirectOnUnauthorized: false,
   });
 }
@@ -491,6 +547,12 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function fetchDashboardSummary(date?: string) {
+  const params = new URLSearchParams();
+  if (date) params.set("date", date);
+  return httpRequest<DashboardSummary>(`/api/dashboard/summary${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function deleteSystemLogs(ids: string[]) {

@@ -231,6 +231,22 @@ class ConfigStore:
         return str(self.data.get("global_system_prompt") or "").strip()
 
     @property
+    def registration_secret(self) -> str:
+        return str(
+            os.getenv("CHATGPT2API_REGISTRATION_SECRET")
+            or self.data.get("registration-secret")
+            or ""
+        ).strip()
+
+    @property
+    def donate_url(self) -> str:
+        return str(
+            os.getenv("CHATGPT2API_DONATE_URL")
+            or self.data.get("donate-url")
+            or "https://buymeacoffee.com/"
+        ).strip()
+
+    @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
         path.mkdir(parents=True, exist_ok=True)

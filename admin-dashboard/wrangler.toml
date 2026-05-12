@@ -1,0 +1,8 @@
+name = "image-gen-admin"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "image-gen-db"
+database_id = "d3163ca4-14bb-4706-bebd-f75aa6ec2397" # Will be filled after creation

@@ -1,0 +1,168 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-win-py313-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-win-py313-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip wheel setuptools
+          pip install PySide6
+          pip install curl-cffi
+          pip install pillow
+          pip install pybase64
+          pip install tiktoken
+          pip install nuitka ordered-set zstandard
+
+      - name: Verify critical imports
+        run: |
+          python -c "
+          import sys
+          errors = []
+          modules = [
+              'PySide6', 'PySide6.QtWidgets', 'PySide6.QtCore', 'PySide6.QtGui',
+              'curl_cffi', 'PIL', 'json', 'pathlib', 'threading',
+          ]
+          for mod in modules:
+              try:
+                  __import__(mod)
+                  print(f'  OK: {mod}')
+              except ImportError as e:
+                  print(f'  FAIL: {mod} -> {e}')
+                  errors.append(f'{mod}: {e}')
+          if errors:
+              print(f'=== {len(errors)} MISSING ===')
+              sys.exit(1)
+          print(f'All {len(modules)} modules OK!')
+          "
+
+      - name: Build with Nuitka (standalone)
+        run: |
+          $cpu = $env:NUMBER_OF_PROCESSORS
+          if (-not $cpu) { $cpu = "4" }
+          echo "Building with Nuitka ($cpu jobs)..."
+          python -m nuitka `
+            --standalone `
+            --windows-console-mode=disable `
+            --output-filename=Imagine-GPT.exe `
+            --enable-plugin=pyside6 `
+            --jobs=$cpu `
+            --lto=no `
+            --include-module=image_generator_ui `
+            --include-module=auto_updater `
+            --include-module=services.account_service `
+            --include-module=services.auth_service `
+            --include-module=services.config `
+            --include-module=services.openai_backend_api `
+            --include-module=services.proxy_service `
+            --include-module=services.log_service `
+            --include-module=services.image_service `
+            --include-module=services.storage.base `
+            --include-module=services.storage.factory `
+            --include-module=services.storage.json_storage `
+            --include-module=hashlib `
+            --include-module=threading `
+            --include-module=json `
+            --include-module=pathlib `
+            --include-module=datetime `
+            --include-module=uuid `
+            --include-module=asyncio `
+            --include-module=subprocess `
+            --include-module=tempfile `
+            --include-module=shutil `
+            --include-module=platform `
+            --include-package=services `
+            --include-package=services.storage `
+            --include-package=services.protocol `
+            --include-package=curl_cffi `
+            --include-package=PIL `
+            --include-package-data=PySide6 `
+            --include-package-data=PIL `
+            --include-package-data=curl_cffi `
+            --include-package-data=certifi `
+            --nofollow-import-to=tkinter `
+            --nofollow-import-to=matplotlib `
+            --nofollow-import-to=numpy `
+            --nofollow-import-to=pandas `
+            --nofollow-import-to=test `
+            --nofollow-import-to=unittest `
+            --nofollow-import-to=sqlalchemy `
+            --nofollow-import-to=psycopg2 `
+            --nofollow-import-to=gitpython `
+            --nofollow-import-to=uvicorn `
+            --nofollow-import-to=fastapi `
+            --no-pyi-file `
+            --assume-yes-for-downloads `
+            image_generator_ui.py
+
+      - name: Create data folders
+        run: |
+          $dist = "image_generator_ui.dist"
+          New-Item -ItemType Directory -Force -Path "$dist\data"
+          New-Item -ItemType Directory -Force -Path "$dist\output"
+          '[]' | Out-File -Encoding utf8 "$dist\data\accounts.json"
+          Copy-Item "config.json" "$dist\config.json"
+          Copy-Item "VERSION" "$dist\VERSION"
+          if (Test-Path "zalo.jpg") { Copy-Item "zalo.jpg" "$dist\zalo.jpg" }
+          if (Test-Path "qrdonate.jpg") { Copy-Item "qrdonate.jpg" "$dist\qrdonate.jpg" }
+
+      - name: Verify build output
+        run: |
+          $exe = "image_generator_ui.dist\Imagine-GPT.exe"
+          if (Test-Path $exe) {
+            $size = (Get-Item $exe).Length
+            $sizeMB = [math]::Round($size / 1MB, 2)
+            echo "Build OK! EXE size: ${sizeMB} MB"
+          } else {
+            echo "ERROR: EXE not found!"
+            Get-ChildItem -Recurse "image_generator_ui.dist" -Filter "*.exe"
+            exit 1
+          }
+
+      - name: Package as ZIP
+        run: |
+          Rename-Item "image_generator_ui.dist" "Imagine-GPT"
+          Compress-Archive -Path "Imagine-GPT" -DestinationPath "Imagine-GPT-windows.zip" -Force
+          $size = (Get-Item "Imagine-GPT-windows.zip").Length
+          $sizeMB = [math]::Round($size / 1MB, 2)
+          echo "ZIP size: ${sizeMB} MB"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Imagine-GPT-windows
+          path: Imagine-GPT-windows.zip
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: Imagine-GPT-windows.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

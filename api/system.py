@@ -7,6 +7,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from services.auth_service import auth_service
+from services.dashboard_service import dashboard_service
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.backup_service import BackupError, backup_service
 from services.config import config
@@ -43,6 +45,11 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+class RegisterRequest(BaseModel):
+    name: str = ""
+    invite_code: str = ""
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -57,9 +64,33 @@ def create_router(app_version: str) -> APIRouter:
             "name": identity.get("name"),
         }
 
+    @router.post("/auth/register")
+    async def register(body: RegisterRequest):
+        required_code = config.registration_secret
+        invite_code = body.invite_code.strip()
+        if required_code and invite_code != required_code:
+            raise HTTPException(status_code=403, detail={"error": "邀请码无效"})
+        try:
+            item, raw_key = auth_service.create_key(role="user", name=body.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {
+            "ok": True,
+            "version": app_version,
+            "role": item.get("role"),
+            "subject_id": item.get("id"),
+            "name": item.get("name"),
+            "key": raw_key,
+        }
+
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
+
+    @router.get("/api/dashboard/summary")
+    async def get_dashboard_summary(date: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return dashboard_service.get_summary(date=date.strip())
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):

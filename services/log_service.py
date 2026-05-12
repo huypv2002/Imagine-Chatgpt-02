@@ -85,6 +85,20 @@ class LogService:
                 break
         return items
 
+    def list_all(self, type: str = "", start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        items: list[dict[str, Any]] = []
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        for line_number in range(len(lines) - 1, -1, -1):
+            item = self._parse_line(lines[line_number], line_number)
+            if item is None:
+                continue
+            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+                continue
+            items.append(item)
+        return items
+
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:

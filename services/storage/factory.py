@@ -7,6 +7,7 @@ from services.storage.base import StorageBackend
 from services.storage.database_storage import DatabaseStorageBackend
 from services.storage.git_storage import GitStorageBackend
 from services.storage.json_storage import JSONStorageBackend
+from services.storage.r2_storage import R2StorageBackend
 
 
 def create_storage_backend(data_dir: Path) -> StorageBackend:
@@ -14,7 +15,7 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     根据环境变量创建存储后端
     
     环境变量：
-    - STORAGE_BACKEND: json|sqlite|postgres|git (默认 json)
+    - STORAGE_BACKEND: json|sqlite|postgres|git|r2 (默认 json)
     - DATABASE_URL: 数据库连接字符串 (用于 sqlite/postgres)
     - GIT_REPO_URL: Git 仓库地址 (用于 git)
     - GIT_TOKEN: Git 访问令牌 (用于 git)
@@ -71,10 +72,21 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
             local_cache_dir=cache_dir,
         )
     
+    elif backend_type in ("r2", "cloudflare_r2"):
+        settings = {
+            "account_id": os.getenv("R2_ACCOUNT_ID", "").strip(),
+            "access_key_id": os.getenv("R2_ACCESS_KEY_ID", "").strip(),
+            "secret_access_key": os.getenv("R2_SECRET_ACCESS_KEY", "").strip(),
+            "bucket": os.getenv("R2_BUCKET", "").strip(),
+            "prefix": os.getenv("R2_PREFIX", "chatgpt2api-db").strip(),
+        }
+        print(f"[storage] Using R2 storage: bucket={settings['bucket'] or '(missing)'} prefix={settings['prefix']}")
+        return R2StorageBackend(settings)
+    
     else:
         raise ValueError(
             f"Unknown storage backend: {backend_type}. "
-            f"Supported backends: json, sqlite, postgres, git"
+            f"Supported backends: json, sqlite, postgres, git, r2"
         )
 
 

@@ -167,6 +167,14 @@ class ImageTaskService:
                 missing_ids = []
             return {"items": items, "missing_ids": missing_ids}
 
+    def list_all_tasks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._cleanup_locked():
+                self._save_locked()
+            items = [_public_task(task) for task in self._tasks.values()]
+            items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+            return items
+
     def _submit(
         self,
         identity: dict[str, object],
