@@ -9,7 +9,13 @@ import time
 
 from services.storage.base import StorageBackend
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+def _runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+BASE_DIR = _runtime_base_dir()
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
@@ -115,8 +121,50 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-def _load_settings() -> LoadedSettings:
+def _default_config() -> dict[str, object]:
+    return {
+        "auth-key": "chatgpt2api",
+        "refresh_account_interval_minute": 60,
+        "image_retention_days": 15,
+        "image_poll_timeout_secs": 120,
+        "image_account_concurrency": 3,
+        "auto_remove_invalid_accounts": False,
+        "auto_remove_rate_limited_accounts": False,
+        "log_levels": ["debug", "info", "warning", "error"],
+        "proxy": "",
+        "base_url": "",
+        "sensitive_words": [],
+        "global_system_prompt": "",
+        "ai_review": {
+            "enabled": False,
+            "base_url": "",
+            "api_key": "",
+            "model": "",
+            "prompt": "",
+        },
+        "backup": _normalize_backup_settings({}),
+    }
+
+
+def _ensure_runtime_files() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(
+            json.dumps(_default_config(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    accounts_file = DATA_DIR / "accounts.json"
+    if not accounts_file.exists():
+        accounts_file.write_text("[]\n", encoding="utf-8")
+    auth_keys_file = DATA_DIR / "auth_keys.json"
+    if not auth_keys_file.exists():
+        auth_keys_file.write_text('{"items": []}\n', encoding="utf-8")
+    if not VERSION_FILE.exists():
+        VERSION_FILE.write_text("0.0\n", encoding="utf-8")
+
+
+def _load_settings() -> LoadedSettings:
+    _ensure_runtime_files()
     raw_config = _read_json_object(CONFIG_FILE, name="config.json")
     auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
     if _is_invalid_auth_key(auth_key):
@@ -139,7 +187,7 @@ def _load_settings() -> LoadedSettings:
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_runtime_files()
         self.data = self._load()
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
