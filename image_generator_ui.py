@@ -18,9 +18,10 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QTextEdit, QComboBox, QProgressBar,
     QStackedWidget, QFileDialog, QMessageBox, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QScrollArea,
-    QSplitter, QLineEdit, QDialog, QDialogButtonBox, QInputDialog
+    QSplitter, QLineEdit, QDialog, QDialogButtonBox, QInputDialog,
+    QCheckBox
 )
-from PySide6.QtCore import Qt, QThread, Signal, QRectF, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QUrl, QTimer
 from PySide6.QtGui import (
     QColor, QLinearGradient, QRadialGradient, QDesktopServices,
     QPainter, QBrush, QPen, QPainterPath
@@ -39,6 +40,69 @@ def app_dir() -> Path:
 
 APP_DIR = app_dir()
 CRASH_LOG = APP_DIR / "Imagine-GPT-crash.log"
+DATA_DIR = APP_DIR / "data"
+GUI_SETTINGS_FILE = DATA_DIR / "gui_settings.json"
+
+
+def find_resource_file(filename: str) -> Path | None:
+    candidates: list[Path] = []
+    for base in (
+        APP_DIR,
+        Path(__file__).resolve().parent,
+        Path(str(getattr(sys, "_MEIPASS", ""))) if getattr(sys, "_MEIPASS", "") else None,
+    ):
+        if base is None:
+            continue
+        path = base / filename
+        if path not in candidates:
+            candidates.append(path)
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def ensure_local_runtime_files() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    defaults = {
+        DATA_DIR / "accounts.json": "[]\n",
+        DATA_DIR / "auth_keys.json": '{"items": []}\n',
+        DATA_DIR / "account_names.json": "{}\n",
+        GUI_SETTINGS_FILE: '{"ui": {}, "login": {}}\n',
+    }
+    for path, content in defaults.items():
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+
+
+def load_gui_settings() -> dict:
+    ensure_local_runtime_files()
+    try:
+        data = json.loads(GUI_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ui": {}, "login": {}}
+    return data if isinstance(data, dict) else {"ui": {}, "login": {}}
+
+
+def save_gui_settings(settings: dict) -> None:
+    ensure_local_runtime_files()
+    data = settings if isinstance(settings, dict) else {}
+    GUI_SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def update_gui_settings(section: str, values: dict) -> None:
+    settings = load_gui_settings()
+    current = settings.get(section)
+    current = current if isinstance(current, dict) else {}
+    current.update(values)
+    settings[section] = current
+    save_gui_settings(settings)
+
+
+ensure_local_runtime_files()
 
 
 def write_crash_log(exc: BaseException) -> None:
@@ -66,7 +130,7 @@ def install_crash_hook() -> None:
 # LOCAL NAMES STORAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-NAMES_FILE = APP_DIR / "data" / "account_names.json"
+NAMES_FILE = DATA_DIR / "account_names.json"
 
 
 def _load_names() -> dict:
@@ -102,24 +166,29 @@ def set_account_name(token: str, name: str):
 
 STYLESHEET = """
 * { margin: 0; padding: 0; }
-QMainWindow { background-color: #f0f2f5; }
+QMainWindow { background-color: #eef4f8; }
 QWidget { background-color: transparent; color: #1a1a2e; font-family: "Inter", -apple-system, "Segoe UI", sans-serif; font-size: 13px; }
 
 /* Panels */
-QFrame#leftPanel { background: #ffffff; border-right: 1px solid #e2e4e9; }
-QFrame#rightPanel { background: #f8f9fb; }
+QFrame#leftPanel {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f0f9ff, stop:0.48 #ffffff, stop:1 #f7fee7);
+    border-right: 1px solid #bfdbfe;
+}
+QFrame#rightPanel {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #f8fafc, stop:0.55 #ffffff, stop:1 #fff7ed);
+}
 
 /* Section title */
-QLabel#sectionTitle { color: #1a1a2e; font-size: 13px; font-weight: 700; padding: 2px 0; }
+QLabel#sectionTitle { color: #0f766e; font-size: 13px; font-weight: 700; padding: 2px 0; }
 QLabel#fieldLabel { color: #4b5563; font-size: 12px; font-weight: 500; }
 QLabel#mutedLabel { color: #9ca3af; font-size: 11px; }
 QLabel#statusOk { color: #059669; font-size: 12px; font-weight: 600; }
 QLabel#statusErr { color: #dc2626; font-size: 12px; font-weight: 600; }
 
 /* Buttons */
-QPushButton#primaryBtn { background-color: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; font-size: 12px; min-height: 32px; min-width: 70px; }
-QPushButton#primaryBtn:hover { background-color: #1d4ed8; }
-QPushButton#primaryBtn:disabled { background-color: #93c5fd; color: #fff; }
+QPushButton#primaryBtn { background-color: #0f766e; color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; font-size: 12px; min-height: 32px; min-width: 70px; }
+QPushButton#primaryBtn:hover { background-color: #0d9488; }
+QPushButton#primaryBtn:disabled { background-color: #99f6e4; color: #fff; }
 
 QPushButton#ghostBtn { background-color: #ffffff; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; padding: 7px 14px; font-weight: 500; font-size: 12px; min-height: 32px; min-width: 60px; }
 QPushButton#ghostBtn:hover { background-color: #f3f4f6; border-color: #9ca3af; }
@@ -135,8 +204,8 @@ QPushButton#linkBtn { background: transparent; color: #2563eb; border: none; pad
 QPushButton#linkBtn:hover { color: #1d4ed8; }
 
 /* Inputs */
-QLineEdit, QTextEdit { background-color: #fff; border: 1.5px solid #d1d5db; border-radius: 6px; padding: 8px 10px; color: #1a1a2e; }
-QLineEdit:focus, QTextEdit:focus { border: 1.5px solid #2563eb; }
+QLineEdit, QTextEdit { background-color: #fff; border: 1.5px solid #cbd5e1; border-radius: 6px; padding: 8px 10px; color: #1a1a2e; }
+QLineEdit:focus, QTextEdit:focus { border: 1.5px solid #0f766e; }
 QComboBox { background-color: #fff; border: 1.5px solid #d1d5db; border-radius: 6px; padding: 7px 10px; color: #1a1a2e; min-height: 32px; }
 QComboBox:hover { border-color: #6b7280; }
 QComboBox::drop-down { border: none; width: 24px; }
@@ -144,14 +213,14 @@ QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-
 QComboBox QAbstractItemView { background-color: #fff; border: 1px solid #d1d5db; border-radius: 6px; padding: 4px; selection-background-color: #eff6ff; outline: none; }
 
 /* Table */
-QTableWidget { background-color: #fff; border: 1.5px solid #e2e4e9; border-radius: 8px; gridline-color: #f0f1f3; }
+QTableWidget { background-color: #fff; border: 1.5px solid #bae6fd; border-radius: 8px; gridline-color: #eff6ff; }
 QTableWidget::item { padding: 8px 10px; border-bottom: 1px solid #f0f1f3; color: #374151; font-size: 12px; }
-QTableWidget::item:selected { background-color: #eff6ff; color: #1a1a2e; }
-QHeaderView::section { background-color: #f4f5f7; color: #4b5563; padding: 8px 10px; border: none; border-bottom: 1.5px solid #e2e4e9; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+QTableWidget::item:selected { background-color: #ecfeff; color: #1a1a2e; }
+QHeaderView::section { background-color: #e0f2fe; color: #075985; padding: 8px 10px; border: none; border-bottom: 1.5px solid #bae6fd; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
 
 /* Progress */
 QProgressBar { background: #e5e7eb; border: none; border-radius: 3px; height: 6px; color: transparent; }
-QProgressBar::chunk { background: #2563eb; border-radius: 3px; }
+QProgressBar::chunk { background: #0f766e; border-radius: 3px; }
 
 /* Scrollbar */
 QScrollBar:vertical { background: transparent; width: 6px; }
@@ -453,6 +522,8 @@ class LeftPanel(QFrame):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+        self._restore_settings()
+        self._connect_setting_saves()
 
     def _title(self, text):
         l = QLabel(text)
@@ -479,6 +550,33 @@ class LeftPanel(QFrame):
         folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu")
         if folder:
             self.folder_input.setText(folder)
+
+    def _restore_settings(self):
+        ui = load_gui_settings().get("ui")
+        ui = ui if isinstance(ui, dict) else {}
+        for combo, key in (
+            (self.model_cb, "model"),
+            (self.ratio_cb, "ratio"),
+            (self.threads_cb, "threads_per_account"),
+        ):
+            value = str(ui.get(key) or "").strip()
+            if value:
+                index = combo.findText(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        prompt_path = str(ui.get("prompt_path") or "").strip()
+        if prompt_path:
+            self.file_input.setText(prompt_path)
+        output_dir = str(ui.get("output_dir") or "").strip()
+        if output_dir:
+            self.folder_input.setText(output_dir)
+
+    def _connect_setting_saves(self):
+        self.model_cb.currentTextChanged.connect(lambda value: update_gui_settings("ui", {"model": value}))
+        self.ratio_cb.currentTextChanged.connect(lambda value: update_gui_settings("ui", {"ratio": value}))
+        self.threads_cb.currentTextChanged.connect(lambda value: update_gui_settings("ui", {"threads_per_account": value}))
+        self.file_input.textChanged.connect(lambda value: update_gui_settings("ui", {"prompt_path": value}))
+        self.folder_input.textChanged.connect(lambda value: update_gui_settings("ui", {"output_dir": value}))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1064,6 +1162,8 @@ class MainWindow(QMainWindow):
 
         # Connect file selection to auto-load grid
         self.left_panel.file_input.textChanged.connect(self._on_file_changed)
+        if self.left_panel.file_input.text() and Path(self.left_panel.file_input.text()).exists():
+            self.right_panel.load_prompts_from_file()
 
     def _switch(self, idx):
         self.pages.setCurrentIndex(idx)
@@ -1113,12 +1213,12 @@ class MainWindow(QMainWindow):
         dl.addWidget(QLabel("Quét mã QR Zalo để liên hệ admin:"))
         from PySide6.QtGui import QPixmap
         img_label = QLabel()
-        img_path = APP_DIR / "zalo.jpg"
-        if img_path.exists():
+        img_path = find_resource_file("zalo.jpg")
+        if img_path:
             pix = QPixmap(str(img_path))
             img_label.setPixmap(pix.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            img_label.setText(f"Chưa có file: assets/zalo.jpg")
+            img_label.setText("Không tìm thấy zalo.jpg")
             img_label.setStyleSheet("color: #9ca3af;")
         img_label.setAlignment(Qt.AlignCenter)
         dl.addWidget(img_label)
@@ -1138,12 +1238,12 @@ class MainWindow(QMainWindow):
         dl.addWidget(QLabel("Quét mã QR để donate ủng hộ tác giả:"))
         from PySide6.QtGui import QPixmap
         img_label = QLabel()
-        img_path = APP_DIR / "qrdonate.jpg"
-        if img_path.exists():
+        img_path = find_resource_file("qrdonate.jpg")
+        if img_path:
             pix = QPixmap(str(img_path))
             img_label.setPixmap(pix.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
-            img_label.setText(f"Chưa có file: assets/qrdonate.jpg")
+            img_label.setText("Không tìm thấy qrdonate.jpg")
             img_label.setStyleSheet("color: #9ca3af;")
         img_label.setAlignment(Qt.AlignCenter)
         dl.addWidget(img_label)
@@ -1489,6 +1589,51 @@ class SessionPage(QWidget):
 AUTH_API_URL = "https://image-gen-admin-2xn.pages.dev/api/auth"
 
 
+def get_saved_login_settings() -> dict:
+    login = load_gui_settings().get("login")
+    return login if isinstance(login, dict) else {}
+
+
+def _extract_session_token(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for source in (payload, payload.get("user")):
+        if not isinstance(source, dict):
+            continue
+        for key in ("session_token", "sessionToken", "token", "access_token", "accessToken"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def save_login_settings(
+    username: str,
+    password: str,
+    user_data: dict | None,
+    remember: bool,
+    auth_payload: dict | None = None,
+) -> None:
+    if not remember:
+        update_gui_settings("login", {
+            "remember": False,
+            "username": username.strip(),
+            "password": "",
+            "user": {},
+            "session_token": "",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        })
+        return
+    update_gui_settings("login", {
+        "remember": True,
+        "username": username.strip(),
+        "password": password,
+        "user": user_data if isinstance(user_data, dict) else {},
+        "session_token": _extract_session_token(auth_payload),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGIN / REGISTER DIALOG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1499,10 +1644,13 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Imagine GPT")
-        self.setFixedSize(420, 420)
+        self.setFixedSize(420, 455)
         self.user_data = None
         self._mode = "login"  # "login" or "register"
+        self._auto_login_attempted = False
         self._build()
+        self._restore_saved_login()
+        QTimer.singleShot(250, self._try_auto_login)
 
     def _build(self):
         # Override stylesheet cho dialog này
@@ -1536,6 +1684,22 @@ class LoginDialog(QDialog):
                 padding: 4px;
             }
             QPushButton#switchBtn:hover { color: #1d4ed8; }
+            QCheckBox {
+                color: #4b5563;
+                font-size: 12px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1.5px solid #cbd5e1;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #0f766e;
+                border: 1.5px solid #0f766e;
+            }
         """)
 
         outer = QVBoxLayout(self)
@@ -1582,6 +1746,10 @@ class LoginDialog(QDialog):
         self.password_input.returnPressed.connect(self._submit)
         lay.addWidget(self.password_input)
 
+        self.remember_cb = QCheckBox("Lưu đăng nhập và tự điền lần sau")
+        self.remember_cb.setChecked(True)
+        lay.addWidget(self.remember_cb)
+
         # Error/success message
         self.msg_label = QLabel("")
         self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
@@ -1625,6 +1793,76 @@ class LoginDialog(QDialog):
 
         outer.addWidget(content)
 
+    def _restore_saved_login(self):
+        saved = get_saved_login_settings()
+        if not bool(saved.get("remember", False)):
+            username = str(saved.get("username") or "").strip()
+            if username:
+                self.username_input.setText(username)
+            self.remember_cb.setChecked(False)
+            return
+        username = str(saved.get("username") or "").strip()
+        password = str(saved.get("password") or "")
+        if username:
+            self.username_input.setText(username)
+        if password:
+            self.password_input.setText(password)
+        self.remember_cb.setChecked(True)
+
+    def _set_busy(self, busy: bool, text: str | None = None):
+        self.submit_btn.setEnabled(not busy)
+        self.username_input.setEnabled(not busy)
+        self.password_input.setEnabled(not busy)
+        self.remember_cb.setEnabled(not busy)
+        self.switch_btn.setEnabled(not busy)
+        if text:
+            self.submit_btn.setText(text)
+        elif not busy:
+            self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+
+    def _request_auth(self, username: str, password: str) -> dict:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.post(
+            AUTH_API_URL,
+            json={"action": self._mode, "username": username, "password": password},
+            timeout=15,
+            impersonate="chrome"
+        )
+        content_type = resp.headers.get("content-type", "")
+        if "json" not in content_type:
+            return {"ok": False, "error": f"Lỗi server (HTTP {resp.status_code}). Thử lại sau."}
+        return resp.json()
+
+    def _try_auto_login(self):
+        if self._auto_login_attempted or self._mode != "login":
+            return
+        self._auto_login_attempted = True
+        saved = get_saved_login_settings()
+        if not bool(saved.get("remember", False)):
+            return
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        if not username or not password:
+            return
+        self.msg_label.setStyleSheet("color: #0f766e; font-size: 12px; background: transparent;")
+        self.msg_label.setText("Đang tự đăng nhập...")
+        self._set_busy(True, "Đang đăng nhập...")
+        try:
+            data = self._request_auth(username, password)
+        except Exception:
+            self._set_busy(False)
+            self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
+            self.msg_label.setText("Không tự đăng nhập được, kiểm tra lại rồi bấm Đăng nhập.")
+            return
+        self._set_busy(False)
+        if data.get("ok"):
+            self.user_data = data.get("user") or {}
+            save_login_settings(username, password, self.user_data, self.remember_cb.isChecked(), data)
+            self.accept()
+            return
+        self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
+        self.msg_label.setText(str(data.get("error") or "Không tự đăng nhập được."))
+
     def _toggle_mode(self):
         if self._mode == "login":
             self._mode = "register"
@@ -1641,6 +1879,8 @@ class LoginDialog(QDialog):
         self.msg_label.setText("")
         self.username_input.clear()
         self.password_input.clear()
+        if self._mode == "login":
+            self._restore_saved_login()
 
     def _submit(self):
         self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
@@ -1651,41 +1891,25 @@ class LoginDialog(QDialog):
             self.msg_label.setText("Vui lòng nhập username và password.")
             return
 
-        self.submit_btn.setEnabled(False)
-        self.submit_btn.setText("Đang xử lý...")
+        self._set_busy(True, "Đang xử lý...")
 
         try:
-            from curl_cffi import requests as cffi_requests
-            resp = cffi_requests.post(
-                AUTH_API_URL,
-                json={"action": self._mode, "username": username, "password": password},
-                timeout=15,
-                impersonate="chrome"
-            )
-            # Handle non-JSON response
-            content_type = resp.headers.get("content-type", "")
-            if "json" not in content_type:
-                self.msg_label.setText(f"Lỗi server (HTTP {resp.status_code}). Thử lại sau.")
-                self.submit_btn.setEnabled(True)
-                self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
-                return
-            data = resp.json()
+            data = self._request_auth(username, password)
         except Exception as e:
             err = str(e)
             if "unexpected character" in err or "json" in err.lower():
                 self.msg_label.setText("Lỗi server. Vui lòng thử lại sau.")
             else:
                 self.msg_label.setText(f"Lỗi kết nối: {err[:60]}")
-            self.submit_btn.setEnabled(True)
-            self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+            self._set_busy(False)
             return
 
-        self.submit_btn.setEnabled(True)
-        self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+        self._set_busy(False)
 
         if data.get("ok"):
             if self._mode == "login":
-                self.user_data = data.get("user")
+                self.user_data = data.get("user") or {}
+                save_login_settings(username, password, self.user_data, self.remember_cb.isChecked(), data)
                 self.accept()
             else:
                 self.msg_label.setStyleSheet("color: #059669; font-size: 12px; background: transparent;")

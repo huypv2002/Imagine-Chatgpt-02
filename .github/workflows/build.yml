@@ -104,6 +104,8 @@ jobs:
             --include-package-data=PIL `
             --include-package-data=curl_cffi `
             --include-package-data=certifi `
+            --include-data-files=zalo.jpg=zalo.jpg `
+            --include-data-files=qrdonate.jpg=qrdonate.jpg `
             --nofollow-import-to=tkinter `
             --nofollow-import-to=matplotlib `
             --nofollow-import-to=numpy `
@@ -122,6 +124,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "Imagine-GPT"
           Copy-Item "Imagine-GPT.exe" "Imagine-GPT\Imagine-GPT.exe"
+          Copy-Item "zalo.jpg" "Imagine-GPT\zalo.jpg"
+          Copy-Item "qrdonate.jpg" "Imagine-GPT\qrdonate.jpg"
 
       - name: Verify build output
         run: |
