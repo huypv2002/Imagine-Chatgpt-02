@@ -245,6 +245,187 @@ class RefreshWorker(QThread):
         self.finished.emit(account_service.refresh_accounts(self.tokens))
 
 
+class ImageEditWorker(QThread):
+    """Worker cho chức năng ảnh + prompt → ảnh mới (tham chiếu hoặc sửa ảnh)"""
+    progress = Signal(int, int, str)
+    item_done = Signal(int, dict)
+    finished = Signal(list)
+
+    CONCURRENCY = 3
+
+    def __init__(self, tasks, model, output_dir, ratio="16:9", prompt_mode="reference"):
+        """
+        tasks: list of dict {"prompt": str, "image_path": str, "subfolder": str}
+        prompt_mode: "reference" = tham chiếu ảnh, "edit" = sửa ảnh trực tiếp
+        """
+        super().__init__()
+        self.tasks = tasks
+        self.model = model
+        self.output_dir = output_dir
+        self.ratio = ratio
+        self.prompt_mode = prompt_mode
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        total = len(self.tasks)
+        results = [None] * total
+        lock = threading.Lock()
+
+        def do_one(idx):
+            if not self._running:
+                return idx, {"success": False, "prompt": self.tasks[idx]["prompt"], "error": "Đã dừng"}
+            task = self.tasks[idx]
+            self.progress.emit(idx + 1, total, task["prompt"][:50])
+            try:
+                token = account_service.get_available_access_token()
+                result = self._edit(token, task, idx)
+                account_service.mark_image_result(token, result["success"])
+                return idx, result
+            except Exception as e:
+                return idx, {"success": False, "prompt": task["prompt"], "error": str(e)}
+
+        workers = min(self.CONCURRENCY, total)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending = {}
+            next_idx = 0
+            for _ in range(min(workers, total)):
+                if next_idx < total:
+                    f = pool.submit(do_one, next_idx)
+                    pending[f] = next_idx
+                    next_idx += 1
+
+            while pending:
+                if not self._running:
+                    for f in pending:
+                        f.cancel()
+                    break
+                done_futures = [f for f in pending if f.done()]
+                if not done_futures:
+                    import time
+                    time.sleep(0.1)
+                    continue
+                for f in done_futures:
+                    idx, result = f.result()
+                    results[idx] = result
+                    self.item_done.emit(idx, result)
+                    del pending[f]
+                    if next_idx < total and self._running:
+                        nf = pool.submit(do_one, next_idx)
+                        pending[nf] = next_idx
+                        next_idx += 1
+
+        for i in range(total):
+            if results[i] is None:
+                results[i] = {"success": False, "prompt": self.tasks[i]["prompt"], "error": "Đã dừng"}
+        self.finished.emit(results)
+
+    def _edit(self, token, task, idx=0):
+        import base64
+        try:
+            api = OpenAIBackendAPI(access_token=token)
+            conv_id = None
+            file_ids, sediment_ids = [], []
+
+            prompt = task["prompt"]
+            image_path = Path(task["image_path"])
+            subfolder = task.get("subfolder", "output")
+
+            if not image_path.exists():
+                return {"success": False, "prompt": prompt, "error": f"Ảnh không tồn tại: {image_path.name}"}
+
+            # Encode image to base64
+            image_data = image_path.read_bytes()
+            image_b64 = base64.b64encode(image_data).decode("ascii")
+
+            # Wrap prompt với ratio
+            RATIO_MAP = {
+                "1:1": "square 1:1",
+                "16:9": "16:9 landscape wide",
+                "9:16": "9:16 portrait vertical",
+                "4:3": "4:3 landscape",
+                "3:4": "3:4 portrait",
+                "3:2": "3:2 landscape",
+                "2:3": "2:3 portrait",
+            }
+            ratio_desc = RATIO_MAP.get(self.ratio, self.ratio)
+            if self.prompt_mode == "edit":
+                full_prompt = f"Edit this image with ratio {ratio_desc}. Instruction: {prompt}"
+            else:
+                full_prompt = f"Use this image as a reference. Create a new image with ratio {ratio_desc} based on this instruction: {prompt}"
+
+            # Output folder
+            save_dir = self.output_dir / subfolder
+            save_dir.mkdir(parents=True, exist_ok=True)
+            existing = len(list(save_dir.glob("*.png")))
+            img_number = existing + 1
+
+            # Stream conversation with image
+            for ev in api.stream_conversation(
+                prompt=full_prompt, model=self.model,
+                images=[image_b64], system_hints=["picture_v2"]
+            ):
+                try:
+                    data = json.loads(ev) if isinstance(ev, str) else ev
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if "conversation_id" in data:
+                    conv_id = data["conversation_id"]
+                msg = data.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, dict):
+                    continue
+                if content.get("content_type") == "multimodal_text":
+                    for part in content.get("parts", []):
+                        if isinstance(part, dict) and "asset_pointer" in part:
+                            ptr = part["asset_pointer"]
+                            if ptr.startswith("file-service://"):
+                                fid = ptr[len("file-service://"):]
+                                if fid not in file_ids:
+                                    file_ids.append(fid)
+                            elif ptr.startswith("sediment://"):
+                                sid = ptr[len("sediment://"):]
+                                if sid not in sediment_ids:
+                                    sediment_ids.append(sid)
+
+            if conv_id:
+                urls = api.resolve_conversation_image_urls(
+                    conversation_id=conv_id, file_ids=file_ids,
+                    sediment_ids=sediment_ids, poll=True)
+                if urls:
+                    imgs = api.download_image_bytes(urls)
+                    saved = []
+                    for i, d in enumerate(imgs):
+                        if len(imgs) == 1:
+                            fname = f"{img_number}.png"
+                        else:
+                            fname = f"{img_number}_{i+1}.png"
+                        fp = save_dir / fname
+                        fp.write_bytes(d)
+                        saved.append(str(fp))
+                    # Delete conversation
+                    try:
+                        path = f"/backend-api/conversation/{conv_id}"
+                        api.session.patch(api.base_url + path,
+                            headers=api._headers(path, {"Content-Type": "application/json"}),
+                            json={"is_visible": False}, timeout=15)
+                    except Exception:
+                        pass
+                    return {"success": True, "prompt": prompt, "files": saved}
+            return {"success": False, "prompt": prompt, "error": "Không tạo được ảnh"}
+        except Exception as e:
+            return {"success": False, "prompt": prompt, "error": str(e)}
+
+
 class ImageWorker(QThread):
     progress = Signal(int, int, str)
     item_done = Signal(int, dict)
@@ -1014,6 +1195,782 @@ class RightPanel(QFrame):
         dlg.exec()
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EDIT LEFT PANEL — Settings for Image Reference / Edit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class EditLeftPanel(QFrame):
+    """Left panel cho tab Tham Chiếu / Sửa Ảnh — có toggle TXT/Folder bên trong"""
+
+    # Signal khi thay đổi input (để right panel auto-load)
+    inputs_changed = Signal()
+
+    def __init__(self, purpose="reference", parent=None):
+        """
+        purpose: "reference" = tham chiếu ảnh tạo mới
+                 "edit" = sửa ảnh trực tiếp
+        """
+        super().__init__(parent)
+        self.purpose = purpose
+        self.mode = "txt"  # current mode, changed by toggle
+        self.setObjectName("leftPanel")
+        self.setFixedWidth(320)
+        self._build()
+
+    def _build(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setSpacing(14)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        # ─── Thiết lập
+        lay.addWidget(self._title("Thiết lập"))
+
+        # Model
+        lay.addWidget(self._field("Model"))
+        self.model_cb = QComboBox()
+        self.model_cb.addItems(["gpt-image-2", "codex-gpt-image-2"])
+        lay.addWidget(self.model_cb)
+
+        # Tỉ lệ
+        lay.addWidget(self._field("Tỉ lệ ảnh"))
+        self.ratio_cb = QComboBox()
+        self.ratio_cb.addItems(["16:9", "1:1", "9:16", "4:3", "3:4", "3:2", "2:3"])
+        lay.addWidget(self.ratio_cb)
+
+        # Số luồng / account
+        lay.addWidget(self._field("Luồng / account (max 3)"))
+        self.threads_cb = QComboBox()
+        self.threads_cb.addItems(["1", "2", "3"])
+        self.threads_cb.setCurrentIndex(0)
+        lay.addWidget(self.threads_cb)
+
+        # ─── Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("background: #e5e7eb; max-height: 1px;")
+        lay.addWidget(sep)
+
+        # ─── Batch section title
+        title_text = "Batch Tham Chiếu" if self.purpose == "reference" else "Batch Sửa Ảnh"
+        lay.addWidget(self._title(title_text))
+
+        # ─── Mode toggle: TXT / Folder
+        lay.addWidget(self._field("Chế độ nhập"))
+        self.mode_cb = QComboBox()
+        self.mode_cb.addItems(["File TXT + Folder ảnh", "Folder (subfolders)"])
+        self.mode_cb.currentIndexChanged.connect(self._on_mode_changed)
+        lay.addWidget(self.mode_cb)
+
+        # ─── Stacked inputs for TXT and Folder modes
+        self.input_stack = QStackedWidget()
+
+        # --- Page 0: TXT mode
+        txt_widget = QWidget()
+        txt_lay = QVBoxLayout(txt_widget)
+        txt_lay.setSpacing(10)
+        txt_lay.setContentsMargins(0, 8, 0, 0)
+
+        txt_lay.addWidget(self._field("File prompt (.txt)"))
+        fr_prompt = QHBoxLayout()
+        fr_prompt.setSpacing(6)
+        self.txt_file_input = QLineEdit()
+        self.txt_file_input.setPlaceholderText("Chọn file .txt chứa prompt...")
+        self.txt_file_input.setReadOnly(True)
+        fr_prompt.addWidget(self.txt_file_input)
+        btn_file = QPushButton("File")
+        btn_file.setObjectName("ghostBtn")
+        btn_file.setCursor(Qt.PointingHandCursor)
+        btn_file.setFixedWidth(45)
+        btn_file.clicked.connect(self._choose_prompt_file)
+        fr_prompt.addWidget(btn_file)
+        txt_lay.addLayout(fr_prompt)
+
+        img_label = "Folder ảnh tham chiếu" if self.purpose == "reference" else "Folder ảnh cần sửa"
+        txt_lay.addWidget(self._field(img_label))
+        fr_img = QHBoxLayout()
+        fr_img.setSpacing(6)
+        self.image_folder_input = QLineEdit()
+        placeholder = "Chọn folder chứa ảnh tham chiếu..." if self.purpose == "reference" else "Chọn folder chứa ảnh cần sửa..."
+        self.image_folder_input.setPlaceholderText(placeholder)
+        self.image_folder_input.setReadOnly(True)
+        fr_img.addWidget(self.image_folder_input)
+        btn_img = QPushButton("...")
+        btn_img.setObjectName("ghostBtn")
+        btn_img.setCursor(Qt.PointingHandCursor)
+        btn_img.setFixedWidth(35)
+        btn_img.clicked.connect(self._choose_image_folder)
+        fr_img.addWidget(btn_img)
+        txt_lay.addLayout(fr_img)
+
+        hint_text = "Mỗi dòng prompt ↔ 1 ảnh tham chiếu (theo thứ tự)" if self.purpose == "reference" else "Mỗi dòng prompt ↔ 1 ảnh cần sửa (theo thứ tự)"
+        hint = QLabel(hint_text)
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        txt_lay.addWidget(hint)
+        txt_lay.addStretch()
+
+        self.input_stack.addWidget(txt_widget)
+
+        # --- Page 1: Folder mode
+        folder_widget = QWidget()
+        folder_lay = QVBoxLayout(folder_widget)
+        folder_lay.setSpacing(10)
+        folder_lay.setContentsMargins(0, 8, 0, 0)
+
+        folder_lay.addWidget(self._field("Folder gốc"))
+        fr_root = QHBoxLayout()
+        fr_root.setSpacing(6)
+        self.folder_root_input = QLineEdit()
+        self.folder_root_input.setPlaceholderText("Chọn folder gốc chứa subfolders...")
+        self.folder_root_input.setReadOnly(True)
+        fr_root.addWidget(self.folder_root_input)
+        btn_root = QPushButton("...")
+        btn_root.setObjectName("ghostBtn")
+        btn_root.setCursor(Qt.PointingHandCursor)
+        btn_root.setFixedWidth(35)
+        btn_root.clicked.connect(self._choose_root_folder)
+        fr_root.addWidget(btn_root)
+        folder_lay.addLayout(fr_root)
+
+        hint2_text = "Mỗi subfolder chứa: ảnh tham chiếu + prompt.txt\n(mỗi dòng prompt ↔ 1 ảnh theo thứ tự)" if self.purpose == "reference" else "Mỗi subfolder chứa: ảnh cần sửa + prompt.txt\n(mỗi dòng prompt ↔ 1 ảnh theo thứ tự)"
+        hint2 = QLabel(hint2_text)
+        hint2.setObjectName("mutedLabel")
+        hint2.setWordWrap(True)
+        folder_lay.addWidget(hint2)
+        folder_lay.addStretch()
+
+        self.input_stack.addWidget(folder_widget)
+
+        lay.addWidget(self.input_stack)
+
+        # ─── Folder lưu output
+        lay.addWidget(self._field("Thư mục lưu"))
+        fr_out = QHBoxLayout()
+        fr_out.setSpacing(6)
+        self.folder_input = QLineEdit()
+        default_out = "./output_ref" if self.purpose == "reference" else "./output_edit"
+        self.folder_input.setText(str(Path(default_out).resolve()))
+        self.folder_input.setReadOnly(True)
+        fr_out.addWidget(self.folder_input)
+        btn_out = QPushButton("...")
+        btn_out.setObjectName("ghostBtn")
+        btn_out.setCursor(Qt.PointingHandCursor)
+        btn_out.setFixedWidth(35)
+        btn_out.clicked.connect(self._choose_output_folder)
+        fr_out.addWidget(btn_out)
+        lay.addLayout(fr_out)
+
+        lay.addStretch()
+        scroll.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        self._restore_settings()
+        self._connect_setting_saves()
+
+    # ─── Property: file_input trả về input phù hợp với mode hiện tại
+    @property
+    def file_input(self):
+        """Trả về QLineEdit chứa path prompt/folder tùy mode"""
+        if self.mode == "txt":
+            return self.txt_file_input
+        return self.folder_root_input
+
+    def _on_mode_changed(self, index):
+        self.mode = "txt" if index == 0 else "folder"
+        self.input_stack.setCurrentIndex(index)
+        update_gui_settings(self._settings_key(), {"input_mode": self.mode})
+        self.inputs_changed.emit()
+
+    def _title(self, text):
+        l = QLabel(text)
+        l.setObjectName("sectionTitle")
+        return l
+
+    def _field(self, text):
+        l = QLabel(text)
+        l.setObjectName("fieldLabel")
+        return l
+
+    def _choose_prompt_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file prompt", "", "Text (*.txt);;Tất cả (*)")
+        if path:
+            self.txt_file_input.setText(path)
+            self.inputs_changed.emit()
+
+    def _choose_image_folder(self):
+        title = "Chọn folder ảnh tham chiếu" if self.purpose == "reference" else "Chọn folder ảnh cần sửa"
+        folder = QFileDialog.getExistingDirectory(self, title)
+        if folder:
+            self.image_folder_input.setText(folder)
+            self.inputs_changed.emit()
+
+    def _choose_root_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn folder gốc")
+        if folder:
+            self.folder_root_input.setText(folder)
+            self.inputs_changed.emit()
+
+    def _choose_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu")
+        if folder:
+            self.folder_input.setText(folder)
+
+    def _settings_key(self):
+        return f"img_{self.purpose}"
+
+    def _restore_settings(self):
+        ui = load_gui_settings().get(self._settings_key())
+        ui = ui if isinstance(ui, dict) else {}
+        for combo, key in (
+            (self.model_cb, "model"),
+            (self.ratio_cb, "ratio"),
+            (self.threads_cb, "threads_per_account"),
+        ):
+            value = str(ui.get(key) or "").strip()
+            if value:
+                index = combo.findText(value)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        # Restore mode
+        saved_mode = str(ui.get("input_mode") or "txt").strip()
+        if saved_mode == "folder":
+            self.mode_cb.setCurrentIndex(1)
+            self.mode = "folder"
+        # Restore paths
+        txt_path = str(ui.get("txt_file") or "").strip()
+        if txt_path:
+            self.txt_file_input.setText(txt_path)
+        img_folder = str(ui.get("image_folder") or "").strip()
+        if img_folder:
+            self.image_folder_input.setText(img_folder)
+        folder_root = str(ui.get("folder_root") or "").strip()
+        if folder_root:
+            self.folder_root_input.setText(folder_root)
+        output_dir = str(ui.get("output_dir") or "").strip()
+        if output_dir:
+            self.folder_input.setText(output_dir)
+
+    def _connect_setting_saves(self):
+        key = self._settings_key()
+        self.model_cb.currentTextChanged.connect(lambda v: update_gui_settings(key, {"model": v}))
+        self.ratio_cb.currentTextChanged.connect(lambda v: update_gui_settings(key, {"ratio": v}))
+        self.threads_cb.currentTextChanged.connect(lambda v: update_gui_settings(key, {"threads_per_account": v}))
+        self.txt_file_input.textChanged.connect(lambda v: update_gui_settings(key, {"txt_file": v}))
+        self.image_folder_input.textChanged.connect(lambda v: update_gui_settings(key, {"image_folder": v}))
+        self.folder_root_input.textChanged.connect(lambda v: update_gui_settings(key, {"folder_root": v}))
+        self.folder_input.textChanged.connect(lambda v: update_gui_settings(key, {"output_dir": v}))
+
+
+
+
+class EditRightPanel(QFrame):
+    """Right panel cho tab Sửa Ảnh — grid + controls"""
+    PAGE_SIZE = 50
+
+    def __init__(self, left_panel: 'EditLeftPanel', parent=None):
+        super().__init__(parent)
+        self.setObjectName("rightPanel")
+        self.left = left_panel
+        self.worker = None
+        self._tasks = []  # list of {"prompt": str, "image_path": str, "subfolder": str}
+        self._statuses = []
+        self._details = []
+        self._current_page = 0
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        self.page_label = QLabel("0 tasks")
+        self.page_label.setObjectName("sectionTitle")
+        hdr.addWidget(self.page_label)
+        hdr.addStretch()
+        self.status_label = QLabel("Chờ cấu hình để bắt đầu")
+        self.status_label.setObjectName("mutedLabel")
+        hdr.addWidget(self.status_label)
+        lay.addLayout(hdr)
+
+        # Grid
+        self.grid = QTableWidget()
+        self.grid.setColumnCount(5)
+        self.grid.setHorizontalHeaderLabels(["#", "Prompt", "Ảnh nguồn", "Tiến độ", "Chi tiết"])
+        h = self.grid.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.Fixed)
+        h.setSectionResizeMode(1, QHeaderView.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.Fixed)
+        h.setSectionResizeMode(4, QHeaderView.Stretch)
+        self.grid.setColumnWidth(0, 50)
+        self.grid.setColumnWidth(3, 70)
+        self.grid.verticalHeader().setVisible(False)
+        self.grid.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.grid.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.grid.cellDoubleClicked.connect(self._on_cell_click)
+        lay.addWidget(self.grid)
+
+        # Pagination
+        pag = QHBoxLayout()
+        pag.setSpacing(6)
+        self.btn_prev = QPushButton("< Trước")
+        self.btn_prev.setObjectName("ghostBtn")
+        self.btn_prev.setCursor(Qt.PointingHandCursor)
+        self.btn_prev.clicked.connect(self._prev_page)
+        self.btn_prev.setEnabled(False)
+        pag.addWidget(self.btn_prev)
+        self.page_info = QLabel("Trang 1/1")
+        self.page_info.setObjectName("mutedLabel")
+        self.page_info.setAlignment(Qt.AlignCenter)
+        pag.addWidget(self.page_info)
+        self.btn_next = QPushButton("Sau >")
+        self.btn_next.setObjectName("ghostBtn")
+        self.btn_next.setCursor(Qt.PointingHandCursor)
+        self.btn_next.clicked.connect(self._next_page)
+        self.btn_next.setEnabled(False)
+        pag.addWidget(self.btn_next)
+        pag.addStretch()
+        lay.addLayout(pag)
+
+        # Progress
+        self.pbar = QProgressBar()
+        self.pbar.setValue(0)
+        self.pbar.setTextVisible(False)
+        self.pbar.setFixedHeight(6)
+        lay.addWidget(self.pbar)
+
+        # Bottom buttons
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        self.btn_run = QPushButton("Chạy")
+        self.btn_run.setStyleSheet("""
+            QPushButton { background-color: #2563eb; color: #ffffff; border: none; border-radius: 6px; padding: 8px 20px; font-weight: 600; font-size: 13px; min-height: 34px; }
+            QPushButton:hover { background-color: #1d4ed8; }
+            QPushButton:disabled { background-color: #93c5fd; color: #ffffff; }
+        """)
+        self.btn_run.setCursor(Qt.PointingHandCursor)
+        self.btn_run.clicked.connect(self._run)
+        bottom.addWidget(self.btn_run)
+        self.btn_stop = QPushButton("Dừng")
+        self.btn_stop.setObjectName("ghostBtn")
+        self.btn_stop.setCursor(Qt.PointingHandCursor)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._stop)
+        bottom.addWidget(self.btn_stop)
+        self.btn_resume = QPushButton("Tiếp")
+        self.btn_resume.setObjectName("ghostBtn")
+        self.btn_resume.setCursor(Qt.PointingHandCursor)
+        self.btn_resume.setEnabled(False)
+        self.btn_resume.clicked.connect(self._resume)
+        bottom.addWidget(self.btn_resume)
+        btn_retry = QPushButton("Chạy lại lỗi")
+        btn_retry.setObjectName("dangerBtn")
+        btn_retry.setCursor(Qt.PointingHandCursor)
+        btn_retry.clicked.connect(self._retry_failed)
+        bottom.addWidget(btn_retry)
+        btn_clear = QPushButton("Xóa")
+        btn_clear.setObjectName("ghostBtn")
+        btn_clear.setCursor(Qt.PointingHandCursor)
+        btn_clear.clicked.connect(self._clear)
+        bottom.addWidget(btn_clear)
+        btn_open = QPushButton("Mở thư mục")
+        btn_open.setObjectName("ghostBtn")
+        btn_open.setCursor(Qt.PointingHandCursor)
+        btn_open.clicked.connect(self._open_folder)
+        bottom.addWidget(btn_open)
+        bottom.addStretch()
+        self.run_status = QLabel("")
+        self.run_status.setObjectName("mutedLabel")
+        bottom.addWidget(self.run_status)
+        lay.addLayout(bottom)
+
+    # ─── Pagination
+    @property
+    def _total_pages(self):
+        return max(1, (len(self._tasks) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+
+    def _refresh_grid_page(self):
+        start = self._current_page * self.PAGE_SIZE
+        end = min(start + self.PAGE_SIZE, len(self._tasks))
+        page_items = self._tasks[start:end]
+        self.grid.setRowCount(len(page_items))
+        for i, task in enumerate(page_items):
+            real_idx = start + i
+            num = QTableWidgetItem(str(real_idx + 1))
+            num.setTextAlignment(Qt.AlignCenter)
+            self.grid.setItem(i, 0, num)
+            self.grid.setItem(i, 1, QTableWidgetItem(task["prompt"][:60]))
+            self.grid.setItem(i, 2, QTableWidgetItem(Path(task["image_path"]).name))
+            status = self._statuses[real_idx] if real_idx < len(self._statuses) else "Chờ"
+            st = QTableWidgetItem(status)
+            st.setTextAlignment(Qt.AlignCenter)
+            if status == "OK":
+                st.setForeground(QColor("#059669"))
+            elif status == "Lỗi":
+                st.setForeground(QColor("#dc2626"))
+            elif "Đang" in status:
+                st.setForeground(QColor("#2563eb"))
+            else:
+                st.setForeground(QColor("#9ca3af"))
+            self.grid.setItem(i, 3, st)
+            detail = self._details[real_idx] if real_idx < len(self._details) else ""
+            det = QTableWidgetItem(detail)
+            if status == "Lỗi":
+                det.setForeground(QColor("#dc2626"))
+            self.grid.setItem(i, 4, det)
+        self.btn_prev.setEnabled(self._current_page > 0)
+        self.btn_next.setEnabled(self._current_page < self._total_pages - 1)
+        self.page_info.setText(f"Trang {self._current_page + 1}/{self._total_pages}")
+
+    def _prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self._refresh_grid_page()
+
+    def _next_page(self):
+        if self._current_page < self._total_pages - 1:
+            self._current_page += 1
+            self._refresh_grid_page()
+
+    # ─── Load tasks
+    def load_tasks(self):
+        """Load tasks dựa trên mode của left panel"""
+        if self.left.mode == "txt":
+            return self._load_txt_mode()
+        else:
+            return self._load_folder_mode()
+
+    def _load_txt_mode(self):
+        """Mode TXT: 1 file prompt + 1 folder ảnh, mỗi dòng ↔ 1 ảnh theo thứ tự"""
+        prompt_path = self.left.file_input.text().strip()
+        image_folder = self.left.image_folder_input.text().strip()
+        if not prompt_path:
+            QMessageBox.warning(self, "Thiếu", "Chọn file prompt (.txt)")
+            return False
+        if not image_folder:
+            label = "Chọn folder ảnh tham chiếu" if self.left.purpose == "reference" else "Chọn folder ảnh cần sửa"
+            QMessageBox.warning(self, "Thiếu", label)
+            return False
+
+        p = Path(prompt_path)
+        img_dir = Path(image_folder)
+        if not p.is_file():
+            QMessageBox.warning(self, "Lỗi", "File prompt không tồn tại")
+            return False
+        if not img_dir.is_dir():
+            QMessageBox.warning(self, "Lỗi", "Folder ảnh không tồn tại")
+            return False
+
+        # Read prompts
+        try:
+            prompts = [l.strip() for l in p.read_text(encoding="utf-8").split("\n") if l.strip()]
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"Không đọc được file:\n{e}")
+            return False
+
+        if not prompts:
+            QMessageBox.warning(self, "Trống", "File prompt rỗng")
+            return False
+
+        # Get images sorted
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+        images = sorted([f for f in img_dir.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS])
+
+        if not images:
+            QMessageBox.warning(self, "Trống", "Folder ảnh không có file ảnh hợp lệ")
+            return False
+
+        # Match: mỗi prompt ↔ 1 ảnh theo thứ tự, nếu prompt nhiều hơn ảnh thì lặp lại ảnh
+        tasks = []
+        subfolder = p.stem
+        for i, prompt in enumerate(prompts):
+            img = images[i % len(images)]
+            tasks.append({"prompt": prompt, "image_path": str(img), "subfolder": subfolder})
+
+        self._tasks = tasks
+        self._statuses = ["Chờ"] * len(tasks)
+        self._details = [""] * len(tasks)
+        self._current_page = 0
+        self._refresh_grid_page()
+        self.page_label.setText(f"{len(tasks)} tasks")
+        self.status_label.setText("Sẵn sàng")
+        return True
+
+    def _load_folder_mode(self):
+        """Mode FOLDER: folder gốc chứa subfolders, mỗi subfolder có ảnh + prompt.txt"""
+        root_path = self.left.file_input.text().strip()
+        if not root_path:
+            QMessageBox.warning(self, "Thiếu", "Chọn folder gốc")
+            return False
+
+        root = Path(root_path)
+        if not root.is_dir():
+            QMessageBox.warning(self, "Lỗi", "Folder gốc không tồn tại")
+            return False
+
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+        tasks = []
+
+        for sub in sorted(root.iterdir()):
+            if not sub.is_dir():
+                continue
+            # Tìm file prompt.txt trong subfolder
+            prompt_file = sub / "prompt.txt"
+            if not prompt_file.exists():
+                # Thử tìm file .txt bất kỳ
+                txt_files = list(sub.glob("*.txt"))
+                if txt_files:
+                    prompt_file = txt_files[0]
+                else:
+                    continue
+
+            try:
+                prompts = [l.strip() for l in prompt_file.read_text(encoding="utf-8").split("\n") if l.strip()]
+            except Exception:
+                continue
+
+            if not prompts:
+                continue
+
+            # Lấy ảnh trong subfolder
+            images = sorted([f for f in sub.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS])
+            if not images:
+                continue
+
+            # Match prompt ↔ ảnh
+            for i, prompt in enumerate(prompts):
+                img = images[i % len(images)]
+                tasks.append({"prompt": prompt, "image_path": str(img), "subfolder": sub.name})
+
+        if not tasks:
+            QMessageBox.warning(self, "Trống", "Không tìm thấy subfolder hợp lệ.\nMỗi subfolder cần có: ảnh + prompt.txt")
+            return False
+
+        self._tasks = tasks
+        self._statuses = ["Chờ"] * len(tasks)
+        self._details = [""] * len(tasks)
+        self._current_page = 0
+        self._refresh_grid_page()
+        self.page_label.setText(f"{len(tasks)} tasks")
+        self.status_label.setText("Sẵn sàng")
+        return True
+
+    # ─── Run
+    def _run(self):
+        if not self._tasks:
+            if not self.load_tasks():
+                return
+        if not self._tasks:
+            return
+        accounts = account_service.list_accounts()
+        if not accounts:
+            QMessageBox.warning(self, "Chưa có session", "Thêm session token trước.")
+            return
+        self._statuses = ["Chờ"] * len(self._tasks)
+        self._details = [""] * len(self._tasks)
+        self._current_page = 0
+        self._refresh_grid_page()
+        out_dir = Path(self.left.folder_input.text())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model = self.left.model_cb.currentText()
+        ratio = self.left.ratio_cb.currentText()
+        threads_per_acc = int(self.left.threads_cb.currentText())
+        num_accounts = len(accounts)
+        total_threads = min(threads_per_acc * num_accounts, 9)
+        self.worker = ImageEditWorker(self._tasks, model, out_dir, ratio, prompt_mode=self.left.purpose)
+        self.worker.CONCURRENCY = total_threads
+        self.worker.progress.connect(self._on_progress)
+        self.worker.item_done.connect(self._on_item_done)
+        self.worker.finished.connect(self._on_done)
+        self.worker.start()
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.btn_resume.setEnabled(False)
+        self.pbar.setValue(0)
+        self.run_status.setText("Đang chạy...")
+
+    def _stop(self):
+        if self.worker:
+            self.worker.stop()
+            self.worker.wait()
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.btn_resume.setEnabled(True)
+        self.run_status.setText("Đã dừng")
+
+    def _resume(self):
+        start_idx = next((i for i, s in enumerate(self._statuses) if s == "Chờ"), None)
+        if start_idx is None:
+            QMessageBox.information(self, "Xong", "Tất cả tasks đã xử lý.")
+            return
+        accounts = account_service.list_accounts()
+        if not accounts:
+            QMessageBox.warning(self, "Chưa có session", "Thêm session token trước.")
+            return
+        remaining = self._tasks[start_idx:]
+        out_dir = Path(self.left.folder_input.text())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        model = self.left.model_cb.currentText()
+        ratio = self.left.ratio_cb.currentText()
+        threads_per_acc = int(self.left.threads_cb.currentText())
+        num_accounts = len(accounts)
+        total_threads = min(threads_per_acc * num_accounts, 9)
+        self.worker = ImageEditWorker(remaining, model, out_dir, ratio, prompt_mode=self.left.purpose)
+        self.worker.CONCURRENCY = total_threads
+        self._resume_offset = start_idx
+        self.worker.progress.connect(self._on_resume_progress)
+        self.worker.item_done.connect(self._on_resume_item_done)
+        self.worker.finished.connect(self._on_done)
+        self.worker.start()
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.btn_resume.setEnabled(False)
+        self.run_status.setText("Đang tiếp tục...")
+
+    # ─── Callbacks
+    def _on_progress(self, cur, total, prompt):
+        self.pbar.setValue(int(cur / total * 100))
+        idx = cur - 1
+        if idx < len(self._statuses):
+            self._statuses[idx] = "Đang..."
+            target_page = idx // self.PAGE_SIZE
+            if target_page != self._current_page:
+                self._current_page = target_page
+            self._refresh_grid_page()
+        self.run_status.setText(f"{cur}/{total}")
+
+    def _on_item_done(self, idx, result):
+        self._update_status(idx, result)
+
+    def _on_resume_progress(self, cur, total, prompt):
+        real_idx = self._resume_offset + cur - 1
+        self.pbar.setValue(int((real_idx + 1) / len(self._tasks) * 100))
+        if real_idx < len(self._statuses):
+            self._statuses[real_idx] = "Đang..."
+            target_page = real_idx // self.PAGE_SIZE
+            if target_page != self._current_page:
+                self._current_page = target_page
+            self._refresh_grid_page()
+        self.run_status.setText(f"{real_idx + 1}/{len(self._tasks)}")
+
+    def _on_resume_item_done(self, idx, result):
+        self._update_status(self._resume_offset + idx, result)
+
+    def _update_status(self, idx, result):
+        if idx >= len(self._statuses):
+            return
+        if result["success"]:
+            self._statuses[idx] = "OK"
+            files = result.get("files", [])
+            self._details[idx] = Path(files[0]).name if files else ""
+        else:
+            self._statuses[idx] = "Lỗi"
+            self._details[idx] = result.get("error", "")[:50]
+        self._refresh_grid_page()
+
+    def _on_done(self, results):
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.btn_resume.setEnabled(True)
+        self.pbar.setValue(100)
+        ok = sum(1 for s in self._statuses if s == "OK")
+        fail = sum(1 for s in self._statuses if s == "Lỗi")
+        self.run_status.setText(f"Xong: {ok} OK, {fail} lỗi")
+
+    def _retry_failed(self):
+        failed = [self._tasks[i] for i, s in enumerate(self._statuses) if s == "Lỗi"]
+        if not failed:
+            QMessageBox.information(self, "OK", "Không có task lỗi.")
+            return
+        self._tasks = failed
+        self._statuses = ["Chờ"] * len(failed)
+        self._details = [""] * len(failed)
+        self._current_page = 0
+        self._refresh_grid_page()
+        self.page_label.setText(f"{len(failed)} tasks")
+        self.run_status.setText(f"{len(failed)} lỗi → sẵn sàng chạy lại")
+
+    def _clear(self):
+        self._tasks = []
+        self._statuses = []
+        self._details = []
+        self._current_page = 0
+        self.grid.setRowCount(0)
+        self.page_label.setText("0 tasks")
+        self.status_label.setText("Chờ cấu hình")
+        self.pbar.setValue(0)
+        self.run_status.setText("")
+        self.page_info.setText("Trang 1/1")
+        self.btn_prev.setEnabled(False)
+        self.btn_next.setEnabled(False)
+
+    def _open_folder(self):
+        folder = Path(self.left.folder_input.text())
+        folder.mkdir(parents=True, exist_ok=True)
+        s = platform.system()
+        try:
+            if s == "Darwin":
+                subprocess.run(["open", str(folder)])
+            elif s == "Windows":
+                subprocess.run(["explorer", str(folder)])
+            else:
+                subprocess.run(["xdg-open", str(folder)])
+        except Exception:
+            pass
+
+    def _on_cell_click(self, row, col):
+        """Double-click vào cột Chi tiết (4) → mở xem ảnh"""
+        if col != 4:
+            return
+        item = self.grid.item(row, 4)
+        if not item:
+            return
+        filename = item.text().strip()
+        if not filename or not filename.endswith(".png"):
+            return
+        out_dir = Path(self.left.folder_input.text())
+        found = None
+        for f in out_dir.rglob(filename):
+            found = f
+            break
+        if not found or not found.exists():
+            return
+        from PySide6.QtGui import QPixmap
+        dlg = QDialog(self)
+        dlg.setWindowTitle(filename)
+        dlg.setMinimumSize(600, 500)
+        dl = QVBoxLayout(dlg)
+        dl.setContentsMargins(10, 10, 10, 10)
+        img_label = QLabel()
+        pix = QPixmap(str(found))
+        if not pix.isNull():
+            scaled = pix.scaled(580, 450, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img_label.setPixmap(scaled)
+        else:
+            img_label.setText("Không thể hiển thị ảnh")
+        img_label.setAlignment(Qt.AlignCenter)
+        dl.addWidget(img_label)
+        path_lbl = QLabel(str(found))
+        path_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        path_lbl.setWordWrap(True)
+        dl.addWidget(path_lbl)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns.accepted.connect(dlg.accept)
+        dl.addWidget(btns)
+        dlg.exec()
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN WINDOW
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1076,6 +2033,40 @@ class MainWindow(QMainWindow):
         self.tab_gen.clicked.connect(lambda: self._switch(0))
         seg_lay.addWidget(self.tab_gen)
 
+        self.tab_ref = QPushButton("Tham Chiếu")
+        self.tab_ref.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: rgba(255,255,255,0.6);
+                border: none;
+                border-radius: 5px;
+                padding: 4px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        """)
+        self.tab_ref.setCursor(Qt.PointingHandCursor)
+        self.tab_ref.clicked.connect(lambda: self._switch(1))
+        seg_lay.addWidget(self.tab_ref)
+
+        self.tab_edit = QPushButton("Sửa Ảnh")
+        self.tab_edit.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: rgba(255,255,255,0.6);
+                border: none;
+                border-radius: 5px;
+                padding: 4px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        """)
+        self.tab_edit.setCursor(Qt.PointingHandCursor)
+        self.tab_edit.clicked.connect(lambda: self._switch(2))
+        seg_lay.addWidget(self.tab_edit)
+
         self.tab_session = QPushButton("Quản Lý Session")
         self.tab_session.setStyleSheet("""
             QPushButton {
@@ -1090,7 +2081,7 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: rgba(255,255,255,0.08); color: #fff; }
         """)
         self.tab_session.setCursor(Qt.PointingHandCursor)
-        self.tab_session.clicked.connect(lambda: self._switch(1))
+        self.tab_session.clicked.connect(lambda: self._switch(3))
         seg_lay.addWidget(self.tab_session)
 
         mb_lay.addWidget(seg)
@@ -1154,7 +2145,29 @@ class MainWindow(QMainWindow):
         gen_lay.addWidget(self.right_panel)
         self.pages.addWidget(gen_page)
 
-        # Page 1: Quản Lý Session (full width)
+        # Page 1: Tham Chiếu — ảnh tham chiếu + prompt → ảnh mới
+        ref_page = QWidget()
+        ref_lay = QHBoxLayout(ref_page)
+        ref_lay.setSpacing(0)
+        ref_lay.setContentsMargins(0, 0, 0, 0)
+        self.ref_left = EditLeftPanel(purpose="reference")
+        self.ref_right = EditRightPanel(self.ref_left)
+        ref_lay.addWidget(self.ref_left)
+        ref_lay.addWidget(self.ref_right)
+        self.pages.addWidget(ref_page)
+
+        # Page 2: Sửa Ảnh — sửa trực tiếp ảnh gốc
+        edit_page = QWidget()
+        edit_lay = QHBoxLayout(edit_page)
+        edit_lay.setSpacing(0)
+        edit_lay.setContentsMargins(0, 0, 0, 0)
+        self.edit_left = EditLeftPanel(purpose="edit")
+        self.edit_right = EditRightPanel(self.edit_left)
+        edit_lay.addWidget(self.edit_left)
+        edit_lay.addWidget(self.edit_right)
+        self.pages.addWidget(edit_page)
+
+        # Page 3: Quản Lý Session (full width)
         self.session_page = SessionPage(max_sessions=self.max_sessions)
         self.pages.addWidget(self.session_page)
 
@@ -1164,6 +2177,10 @@ class MainWindow(QMainWindow):
         self.left_panel.file_input.textChanged.connect(self._on_file_changed)
         if self.left_panel.file_input.text() and Path(self.left_panel.file_input.text()).exists():
             self.right_panel.load_prompts_from_file()
+
+        # Connect edit panels auto-load
+        self.ref_left.inputs_changed.connect(lambda: self.ref_right.load_tasks())
+        self.edit_left.inputs_changed.connect(lambda: self.edit_right.load_tasks())
 
     def _switch(self, idx):
         self.pages.setCurrentIndex(idx)
@@ -1191,12 +2208,10 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover { background: rgba(255,255,255,0.08); color: #fff; }
         """
-        if idx == 0:
-            self.tab_gen.setStyleSheet(active_style)
-            self.tab_session.setStyleSheet(inactive_style)
-        else:
-            self.tab_gen.setStyleSheet(inactive_style)
-            self.tab_session.setStyleSheet(active_style)
+        tabs = [self.tab_gen, self.tab_ref, self.tab_edit, self.tab_session]
+        for i, tab in enumerate(tabs):
+            tab.setStyleSheet(active_style if i == idx else inactive_style)
+        if idx == 3:
             self.session_page.reload()
 
     def _on_file_changed(self, path):
