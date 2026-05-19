@@ -1,9 +1,17 @@
 // GET /api/users — List all users (admin only)
-// POST /api/users — Update user (activate/deactivate/change max_sessions/set expires_at/extend days)
+// POST /api/users — Create or Update user (admin only)
+// DELETE /api/users — Delete user (admin only)
 
 function checkAdmin(request) {
   const auth = request.headers.get("Authorization") || "";
   return auth === "Basic bXZoMzA6MzAxMDIwMDI=";
+}
+
+async function hashPassword(password) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password + "_imagine_salt_2024");
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function onRequestGet(context) {
@@ -22,9 +30,6 @@ export async function onRequestGet(context) {
     if (user.expires_at) {
       const expiresAt = new Date(user.expires_at + "Z");
       days_remaining = Math.max(0, Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)));
-      if (days_remaining === 0 && user.is_active) {
-        days_remaining = 0; // expired but not yet disabled (will be on next login)
-      }
     }
     return { ...user, days_remaining };
   });
@@ -37,11 +42,40 @@ export async function onRequestPost(context) {
     return new Response("Unauthorized", { status: 401 });
   }
   const body = await context.request.json();
-  const { id, is_active, max_sessions, expires_at, extend_days } = body;
+  const { id, username, password, is_active, max_sessions, expires_at, extend_days } = body;
   const db = context.env.DB;
 
+  // ─── CREATE NEW USER (no id provided)
+  if (!id && username && password) {
+    const existing = await db.prepare("SELECT id FROM users WHERE username = ?").bind(username).first();
+    if (existing) {
+      return Response.json({ ok: false, error: "Username đã tồn tại" }, { status: 409 });
+    }
+
+    const pw_hash = await hashPassword(password);
+    const active = is_active !== undefined ? (is_active ? 1 : 0) : 1;
+    const sessions = max_sessions || 3;
+
+    // Calculate expires_at if extend_days provided
+    let expiresValue = null;
+    if (extend_days && extend_days > 0) {
+      const d = new Date();
+      d.setDate(d.getDate() + extend_days);
+      expiresValue = d.toISOString().replace("T", " ").substring(0, 19);
+    } else if (expires_at) {
+      expiresValue = expires_at;
+    }
+
+    await db.prepare(
+      "INSERT INTO users (username, password_hash, is_active, max_sessions, expires_at) VALUES (?, ?, ?, ?, ?)"
+    ).bind(username, pw_hash, active, sessions, expiresValue).run();
+
+    return Response.json({ ok: true, message: "User created" });
+  }
+
+  // ─── UPDATE EXISTING USER (id provided)
   if (!id) {
-    return Response.json({ ok: false, error: "Missing user id" }, { status: 400 });
+    return Response.json({ ok: false, error: "Missing user id or username+password for creation" }, { status: 400 });
   }
 
   const updates = [];
@@ -55,28 +89,28 @@ export async function onRequestPost(context) {
     updates.push("max_sessions = ?");
     values.push(max_sessions);
   }
+  if (password) {
+    const pw_hash = await hashPassword(password);
+    updates.push("password_hash = ?");
+    values.push(pw_hash);
+  }
   if (expires_at !== undefined) {
-    // Set exact expiration date (ISO format: "2025-06-30 23:59:59")
     updates.push("expires_at = ?");
-    values.push(expires_at || null); // null = unlimited
+    values.push(expires_at || null);
   }
   if (extend_days !== undefined && extend_days > 0) {
-    // Extend from current expires_at or from now
-    // If user already has expires_at in the future, extend from that date
-    // If expired or no expires_at, extend from now
     const user = await db.prepare("SELECT expires_at FROM users WHERE id = ?").bind(id).first();
     let baseDate = new Date();
     if (user && user.expires_at) {
       const existing = new Date(user.expires_at + "Z");
       if (existing > baseDate) {
-        baseDate = existing; // extend from future date
+        baseDate = existing;
       }
     }
     baseDate.setDate(baseDate.getDate() + extend_days);
     const newExpires = baseDate.toISOString().replace("T", " ").substring(0, 19);
     updates.push("expires_at = ?");
     values.push(newExpires);
-    // Also activate the user when extending
     if (is_active === undefined) {
       updates.push("is_active = 1");
     }

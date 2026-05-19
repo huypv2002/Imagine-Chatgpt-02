@@ -356,24 +356,14 @@ async function saveUser() {
   const extend = parseInt(document.getElementById('f-extend').value);
 
   if (!id) {
-    // Add new via auth API
+    // Create new user via /api/users (admin)
     if (!username || !password) { alert('Nhập đủ username và password'); return; }
-    const r = await fetch('/api/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'register', username, password })
-    });
+    const body = { username, password, is_active, max_sessions };
+    if (extend === -1) body.expires_at = null;
+    else if (extend > 0) body.extend_days = extend;
+    const r = await fetch('/api/users', { method: 'POST', headers: H, body: JSON.stringify(body) });
     const d = await r.json();
-    if (!d.ok) { alert(d.error || 'Lỗi'); return; }
-    // Update active/sessions/extend
-    const users = (await (await fetch('/api/users', { headers: H })).json()).users || [];
-    const newUser = users.find(u => u.username === username);
-    if (newUser) {
-      const body = { id: newUser.id, is_active, max_sessions };
-      if (extend === -1) body.expires_at = null;
-      else if (extend > 0) body.extend_days = extend;
-      await fetch('/api/users', { method: 'POST', headers: H, body: JSON.stringify(body) });
-    }
+    if (!d.ok) { alert(d.error || 'Lỗi tạo user'); return; }
   } else {
     // Update existing
     const body = { id: parseInt(id), is_active, max_sessions };
