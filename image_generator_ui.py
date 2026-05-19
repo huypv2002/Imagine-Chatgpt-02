@@ -2129,6 +2129,23 @@ class MainWindow(QMainWindow):
         btn_donate.clicked.connect(self._show_donate)
         mb_lay.addWidget(btn_donate)
 
+        btn_logout = QPushButton("Đăng xuất")
+        btn_logout.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: rgba(255,255,255,0.6);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 5px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover { color: #fca5a5; border-color: rgba(252,165,165,0.4); }
+        """)
+        btn_logout.setCursor(Qt.PointingHandCursor)
+        btn_logout.clicked.connect(self._logout)
+        mb_lay.addWidget(btn_logout)
+
         root.addWidget(menu_bar)
 
         # Pages
@@ -2267,6 +2284,25 @@ class MainWindow(QMainWindow):
         btns.accepted.connect(dlg.accept)
         dl.addWidget(btns)
         dlg.exec()
+
+    def _logout(self):
+        reply = QMessageBox.question(
+            self, "Đăng xuất",
+            "Bạn có chắc muốn đăng xuất?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # Xóa saved login
+        update_gui_settings("login", {
+            "remember": False,
+            "username": "",
+            "password": "",
+            "user": {},
+            "session_token": "",
+        })
+        # Thoát app — user sẽ phải login lại khi mở
+        QApplication.quit()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
