@@ -25,17 +25,17 @@ export async function onRequestPost(context) {
     if (existing) {
       return Response.json({ ok: false, error: "Username đã tồn tại" }, { status: 409 });
     }
-    // Create user (is_active = 1, active ngay khi đăng ký)
+    // Create user (is_active = 0, cần admin kích hoạt + set ngày)
     await db.prepare(
-      "INSERT INTO users (username, password_hash, is_active, max_sessions) VALUES (?, ?, 1, 3)"
+      "INSERT INTO users (username, password_hash, is_active, max_sessions) VALUES (?, ?, 0, 3)"
     ).bind(username, pw_hash).run();
 
-    return Response.json({ ok: true, message: "Đăng ký thành công! Bạn có thể đăng nhập ngay." });
+    return Response.json({ ok: true, message: "Đăng ký thành công! Liên hệ admin để kích hoạt tài khoản." });
   }
 
   if (action === "login") {
     const user = await db.prepare(
-      "SELECT id, username, is_active, max_sessions FROM users WHERE username = ? AND password_hash = ?"
+      "SELECT id, username, is_active, max_sessions, expires_at FROM users WHERE username = ? AND password_hash = ?"
     ).bind(username, pw_hash).first();
 
     if (!user) {
@@ -46,8 +46,32 @@ export async function onRequestPost(context) {
       return Response.json({ ok: false, error: "Tài khoản chưa được kích hoạt. Liên hệ admin." }, { status: 403 });
     }
 
+    // Check subscription expiration
+    if (user.expires_at) {
+      const now = new Date();
+      const expiresAt = new Date(user.expires_at + "Z"); // UTC
+      if (now > expiresAt) {
+        // Auto-disable account
+        await db.prepare("UPDATE users SET is_active = 0 WHERE id = ?").bind(user.id).run();
+        return Response.json({
+          ok: false,
+          error: "Gói dịch vụ đã hết hạn. Liên hệ admin để gia hạn.",
+          expired: true,
+          expires_at: user.expires_at,
+        }, { status: 403 });
+      }
+    }
+
     // Update last login
     await db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").bind(user.id).run();
+
+    // Calculate remaining days
+    let days_remaining = null;
+    if (user.expires_at) {
+      const now = new Date();
+      const expiresAt = new Date(user.expires_at + "Z");
+      days_remaining = Math.max(0, Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24)));
+    }
 
     return Response.json({
       ok: true,
@@ -55,6 +79,8 @@ export async function onRequestPost(context) {
         id: user.id,
         username: user.username,
         max_sessions: user.max_sessions,
+        expires_at: user.expires_at || null,
+        days_remaining: days_remaining,
       }
     });
   }

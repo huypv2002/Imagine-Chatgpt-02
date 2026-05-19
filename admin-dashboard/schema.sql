@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_active INTEGER DEFAULT 0,
     max_sessions INTEGER DEFAULT 3,
+    expires_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     last_login_at TEXT
 );

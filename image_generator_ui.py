@@ -2951,7 +2951,16 @@ def main():
         max_sessions = user_data.get("max_sessions", 3)
 
         win = MainWindow(max_sessions=max_sessions)
-        win.setWindowTitle(f"Image Generator v{getattr(sys, 'IMAGINE_GPT_VERSION', '1.2')} — {user_data.get('username', '')}")
+        # Build title with subscription info
+        title_parts = [f"Image Generator v{getattr(sys, 'IMAGINE_GPT_VERSION', '1.4')}"]
+        title_parts.append(f"— {user_data.get('username', '')}")
+        days_remaining = user_data.get("days_remaining")
+        if days_remaining is not None:
+            if days_remaining <= 3:
+                title_parts.append(f"⚠️ Còn {days_remaining} ngày")
+            else:
+                title_parts.append(f"({days_remaining} ngày)")
+        win.setWindowTitle(" ".join(title_parts))
         win.show()
         sys.exit(app.exec())
     except Exception as exc:
