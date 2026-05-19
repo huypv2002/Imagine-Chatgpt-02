@@ -20,17 +20,8 @@ export async function onRequestPost(context) {
   const pw_hash = await hashPassword(password);
 
   if (action === "register") {
-    // Check if username exists
-    const existing = await db.prepare("SELECT id FROM users WHERE username = ?").bind(username).first();
-    if (existing) {
-      return Response.json({ ok: false, error: "Username đã tồn tại" }, { status: 409 });
-    }
-    // Create user (is_active = 0, cần admin kích hoạt + set ngày)
-    await db.prepare(
-      "INSERT INTO users (username, password_hash, is_active, max_sessions) VALUES (?, ?, 0, 3)"
-    ).bind(username, pw_hash).run();
-
-    return Response.json({ ok: true, message: "Đăng ký thành công! Liên hệ admin để kích hoạt tài khoản." });
+    // Register is disabled — admin creates accounts via /api/users
+    return Response.json({ ok: false, error: "Đăng ký đã bị tắt. Liên hệ admin để được cấp tài khoản." }, { status: 403 });
   }
 
   if (action === "login") {

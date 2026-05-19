@@ -2661,7 +2661,6 @@ class LoginDialog(QDialog):
         self.setWindowTitle("Imagine GPT")
         self.setFixedSize(420, 455)
         self.user_data = None
-        self._mode = "login"  # "login" or "register"
         self._auto_login_attempted = False
         self._build()
         self._restore_saved_login()
@@ -2793,18 +2792,13 @@ class LoginDialog(QDialog):
         self.submit_btn.clicked.connect(self._submit)
         lay.addWidget(self.submit_btn)
 
-        # Switch mode
-        switch_row = QHBoxLayout()
-        switch_row.setAlignment(Qt.AlignCenter)
-        self.switch_hint = QLabel("Chưa có tài khoản?")
-        self.switch_hint.setStyleSheet("color: #6b7280; font-size: 13px; background: transparent;")
-        self.switch_btn = QPushButton("Đăng ký ngay")
-        self.switch_btn.setObjectName("switchBtn")
-        self.switch_btn.setCursor(Qt.PointingHandCursor)
-        self.switch_btn.clicked.connect(self._toggle_mode)
-        switch_row.addWidget(self.switch_hint)
-        switch_row.addWidget(self.switch_btn)
-        lay.addLayout(switch_row)
+        # Hint liên hệ admin
+        hint_row = QHBoxLayout()
+        hint_row.setAlignment(Qt.AlignCenter)
+        hint_lbl = QLabel("Chưa có tài khoản? Liên hệ admin để được cấp.")
+        hint_lbl.setStyleSheet("color: #6b7280; font-size: 12px; background: transparent;")
+        hint_row.addWidget(hint_lbl)
+        lay.addLayout(hint_row)
 
         outer.addWidget(content)
 
@@ -2829,17 +2823,16 @@ class LoginDialog(QDialog):
         self.username_input.setEnabled(not busy)
         self.password_input.setEnabled(not busy)
         self.remember_cb.setEnabled(not busy)
-        self.switch_btn.setEnabled(not busy)
         if text:
             self.submit_btn.setText(text)
         elif not busy:
-            self.submit_btn.setText("Đăng nhập" if self._mode == "login" else "Đăng ký")
+            self.submit_btn.setText("Đăng nhập")
 
     def _request_auth(self, username: str, password: str) -> dict:
         from curl_cffi import requests as cffi_requests
         resp = cffi_requests.post(
             AUTH_API_URL,
-            json={"action": self._mode, "username": username, "password": password},
+            json={"action": "login", "username": username, "password": password},
             timeout=15,
             impersonate="chrome"
         )
@@ -2849,7 +2842,7 @@ class LoginDialog(QDialog):
         return resp.json()
 
     def _try_auto_login(self):
-        if self._auto_login_attempted or self._mode != "login":
+        if self._auto_login_attempted:
             return
         self._auto_login_attempted = True
         saved = get_saved_login_settings()
@@ -2878,25 +2871,6 @@ class LoginDialog(QDialog):
         self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
         self.msg_label.setText(str(data.get("error") or "Không tự đăng nhập được."))
 
-    def _toggle_mode(self):
-        if self._mode == "login":
-            self._mode = "register"
-            self.subtitle.setText("Tạo tài khoản mới")
-            self.submit_btn.setText("Đăng ký")
-            self.switch_hint.setText("Đã có tài khoản?")
-            self.switch_btn.setText("Đăng nhập")
-        else:
-            self._mode = "login"
-            self.subtitle.setText("Đăng nhập để tiếp tục")
-            self.submit_btn.setText("Đăng nhập")
-            self.switch_hint.setText("Chưa có tài khoản?")
-            self.switch_btn.setText("Đăng ký ngay")
-        self.msg_label.setText("")
-        self.username_input.clear()
-        self.password_input.clear()
-        if self._mode == "login":
-            self._restore_saved_login()
-
     def _submit(self):
         self.msg_label.setStyleSheet("color: #dc2626; font-size: 12px; background: transparent;")
         self.msg_label.setText("")
@@ -2906,7 +2880,7 @@ class LoginDialog(QDialog):
             self.msg_label.setText("Vui lòng nhập username và password.")
             return
 
-        self._set_busy(True, "Đang xử lý...")
+        self._set_busy(True, "Đang đăng nhập...")
 
         try:
             data = self._request_auth(username, password)
@@ -2922,16 +2896,11 @@ class LoginDialog(QDialog):
         self._set_busy(False)
 
         if data.get("ok"):
-            if self._mode == "login":
-                self.user_data = data.get("user") or {}
-                save_login_settings(username, password, self.user_data, self.remember_cb.isChecked(), data)
-                self.accept()
-            else:
-                self.msg_label.setStyleSheet("color: #059669; font-size: 12px; background: transparent;")
-                self.msg_label.setText(data.get("message", "Đăng ký thành công! Hãy đăng nhập."))
-                self._toggle_mode()
+            self.user_data = data.get("user") or {}
+            save_login_settings(username, password, self.user_data, self.remember_cb.isChecked(), data)
+            self.accept()
         else:
-            self.msg_label.setText(data.get("error", "Thất bại"))
+            self.msg_label.setText(data.get("error", "Đăng nhập thất bại"))
 
 
 def main():
